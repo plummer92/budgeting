@@ -2,3 +2,4 @@ plaid-python
 psycopg2-binary
 python-dotenv
 pandas
+SQLAlchemy
