@@ -1,32 +1,30 @@
 import streamlit as st
 import pandas as pd
-import psycopg2
 import os
 import hashlib
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
 
 load_dotenv()
 
 # --- DATABASE CONNECTION ---
 def get_db_connection():
-    # Check Streamlit Secrets first (Cloud), then local .env
     db_url = os.getenv("DATABASE_URL")
     if not db_url and "DATABASE_URL" in st.secrets:
         db_url = st.secrets["DATABASE_URL"]
     
     if not db_url:
-        st.error("❌ Database URL not found! Did you set the secrets in Streamlit Cloud?")
+        st.error("❌ Database URL not found!")
         st.stop()
         
-    return psycopg2.connect(db_url)
+    return create_engine(db_url.replace("postgres://", "postgresql://"))
 
-# --- 0. INITIALIZE DB (Fixes the "Relation does not exist" error) ---
+# --- DB INIT ---
 def init_db():
-    """Creates the table if it doesn't exist yet."""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
+    engine = get_db_connection()
+    with engine.connect() as conn:
+        # We added a 'source' column to track if it's Chase or Citi
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS transactions (
                 transaction_id TEXT PRIMARY KEY, 
                 date DATE, 
@@ -37,193 +35,180 @@ def init_db():
                 bucket TEXT, 
                 pending BOOLEAN,
                 manual_category TEXT, 
-                manual_bucket TEXT
+                manual_bucket TEXT,
+                source TEXT
             );
-        """)
+        """))
         conn.commit()
-        conn.close()
-    except Exception as e:
-        st.error(f"Database Initialization Error: {e}")
-# --- 1. THE SMARTER NORMALIZER ---
-def clean_bank_csv(uploaded_file):
-    df = pd.read_csv(uploaded_file)
+
+# --- BANK SPECIFIC PROCESSORS ---
+def process_chase(df):
+    """Handles Chase CSV format specifically"""
+    # Chase usually has: Posting Date, Description, Amount, Type, Balance, Check or Slip #
     
-    # 1. CLEAN HEADERS: lowercase, strip spaces
+    # 1. Map Columns (Exact Chase Names)
+    # Note: Use lowercase for matching
     df.columns = df.columns.str.strip().str.lower()
     
-    # DEBUG: Show the user what columns were actually found
-    st.write("🔍 Found these columns in your CSV:", df.columns.tolist())
-    
-    # 2. MAP COLUMNS: Add every variation you can think of here!
-    column_map = {
-        # DATE variations
-        'posting date': 'date',       # Chase
-        'post date': 'date',
-        'trans. date': 'date',
-        'transaction date': 'date',
-        'effective date': 'date',
-        'date': 'date',               # Citi / Wells
-        
-        # NAME variations
-        'description': 'name',        # Chase / Citi
-        'merchant name': 'name', 
-        'original description': 'name',
-        'transaction description': 'name',
-        
-        # AMOUNT variations
-        'amount': 'amount',
-        'credit': 'credit',
-        'debit': 'debit'
+    # Chase specific mapping
+    col_map = {
+        'posting date': 'date',
+        'description': 'name',
+        'amount': 'amount'
     }
+    df = df.rename(columns=col_map)
     
-    # Rename columns using the map
-    df = df.rename(columns=column_map)
-    
-    # 3. Handle Citi-style "Debit" and "Credit" split
-    if 'amount' not in df.columns:
-        if 'debit' in df.columns and 'credit' in df.columns:
-            df['amount'] = df['credit'].fillna(0) - df['debit'].fillna(0)
-        elif 'debit' in df.columns:
-             df['amount'] = df['debit'].fillna(0) * -1
-             
-    # 4. Crash prevention
-    if 'amount' not in df.columns:
-        st.error(f"❌ Could not find an Amount column! We found: {list(df.columns)}")
+    # 2. Validate
+    if 'date' not in df.columns or 'amount' not in df.columns:
+        st.error(f"❌ Chase Error: Missing columns. Found: {list(df.columns)}")
         st.stop()
-    if 'date' not in df.columns:
-        st.error(f"❌ Could not find a Date column! We found: {list(df.columns)}")
+        
+    # 3. Fix Dates (Chase is usually MM/DD/YYYY)
+    df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+    
+    # 4. Tag Source
+    df['source'] = 'Chase'
+    
+    return df
+
+def process_citi(df):
+    """Handles Citi CSV format specifically"""
+    # Citi usually has: Status, Date, Description, Debit, Credit
+    
+    df.columns = df.columns.str.strip().str.lower()
+    
+    # Citi specific mapping
+    col_map = {
+        'date': 'date',
+        'description': 'name',
+        # Citi splits amount into Debit/Credit
+    }
+    df = df.rename(columns=col_map)
+    
+    # 2. Calculate Amount (Credit - Debit)
+    # Ensure columns exist, fill with 0 if missing
+    if 'debit' not in df.columns: df['debit'] = 0
+    if 'credit' not in df.columns: df['credit'] = 0
+    
+    df['amount'] = df['credit'].fillna(0) - df['debit'].fillna(0)
+    
+    # 3. Fix Dates
+    df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+    
+    # 4. Tag Source
+    df['source'] = 'Citi'
+    
+    return df
+
+# --- MAIN CLEANING FUNCTION ---
+def clean_bank_csv(uploaded_file, bank_choice):
+    try:
+        df = pd.read_csv(uploaded_file)
+        
+        # Route to the correct processor
+        if bank_choice == "Chase":
+            df = process_chase(df)
+        elif bank_choice == "Citi":
+            df = process_citi(df)
+            
+        # --- COMMON STEPS (ID Gen, Cleanup) ---
+        
+        # Cleanup Amount
+        if df['amount'].dtype == 'object':
+            df['amount'] = df['amount'].astype(str).str.replace('$', '').str.replace(',', '')
+            df['amount'] = pd.to_numeric(df['amount'])
+            
+        # Generate ID
+        def generate_id(row):
+            d = str(row.get('date', ''))
+            n = str(row.get('name', ''))
+            a = str(row.get('amount', ''))
+            return hashlib.md5(f"{d}{n}{a}".encode()).hexdigest()
+
+        df['transaction_id'] = df.apply(generate_id, axis=1)
+        df['bucket'] = 'SPEND'
+        df['category'] = 'Uncategorized'
+        
+        # Final Columns
+        required_cols = ['transaction_id', 'date', 'name', 'amount', 'category', 'bucket', 'source']
+        for col in required_cols:
+            if col not in df.columns: df[col] = None 
+            
+        return df[required_cols].dropna(subset=['date'])
+        
+    except Exception as e:
+        st.error(f"Error processing {bank_choice} file: {e}")
         st.stop()
-    
-    # 5. Cleanup Amount
-    if df['amount'].dtype == 'object':
-        df['amount'] = df['amount'].astype(str).str.replace('$', '').str.replace(',', '')
-        df['amount'] = pd.to_numeric(df['amount'])
-        
-    # 6. Generate ID
-    def generate_id(row):
-        # Convert date to string to prevent "None" errors in hash
-        d = str(row.get('date', ''))
-        n = str(row.get('name', ''))
-        a = str(row.get('amount', ''))
-        raw = f"{d}{n}{a}"
-        return hashlib.md5(raw.encode()).hexdigest()
 
-    df['transaction_id'] = df.apply(generate_id, axis=1)
-    df['bucket'] = 'SPEND'
-    df['category'] = 'Uncategorized'
-    
-    # 7. Select Final Columns
-    required_cols = ['transaction_id', 'date', 'name', 'amount', 'category', 'bucket']
-    for col in required_cols:
-        if col not in df.columns:
-            df[col] = None 
-            
-    return df[required_cols]
-        
-    # 6. Generate ID
-    def generate_id(row):
-        raw = f"{row.get('date', '')}{row.get('name', '')}{row.get('amount', '')}"
-        return hashlib.md5(raw.encode()).hexdigest()
-
-    df['transaction_id'] = df.apply(generate_id, axis=1)
-    df['bucket'] = 'SPEND'
-    df['category'] = 'Uncategorized'
-    
-    # 7. Select Final Columns
-    required_cols = ['transaction_id', 'date', 'name', 'amount', 'category', 'bucket']
-    for col in required_cols:
-        if col not in df.columns:
-            df[col] = None 
-            
-    return df[required_cols]
-        
-    # Generate ID
-    def generate_id(row):
-        # Create unique ID based on row data
-        raw = f"{row.get('date', '')}{row.get('name', '')}{row.get('amount', '')}"
-        return hashlib.md5(raw.encode()).hexdigest()
-
-    df['transaction_id'] = df.apply(generate_id, axis=1)
-    df['bucket'] = 'SPEND'
-    df['category'] = 'Uncategorized'
-    
-    # Select only columns we need (and handle missing ones gracefully)
-    required_cols = ['transaction_id', 'date', 'name', 'amount', 'category', 'bucket']
-    for col in required_cols:
-        if col not in df.columns:
-            df[col] = None # Fill missing with None
-            
-    return df[required_cols]
-
-# --- 2. SAVE TO NEON ---
+# --- SAVE TO DB ---
 def save_to_neon(df):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    added_count = 0
-    for _, row in df.iterrows():
-        try:
-            cur.execute("""
-                INSERT INTO transactions (
-                    transaction_id, date, name, merchant_name, 
-                    amount, category, bucket, pending
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (transaction_id) DO NOTHING;
-            """, (
-                row['transaction_id'], row['date'], row['name'], row['name'],
-                row['amount'], row['category'], row['bucket'], False
-            ))
-            if cur.rowcount > 0:
-                added_count += 1
-        except Exception as e:
-            st.warning(f"Skipped row error: {e}")
-            
-    conn.commit()
-    conn.close()
-    return added_count
+    engine = get_db_connection()
+    count = 0
+    with engine.connect() as conn:
+        for _, row in df.iterrows():
+            try:
+                # We added 'source' to the INSERT
+                conn.execute(text("""
+                    INSERT INTO transactions (transaction_id, date, name, merchant_name, amount, category, bucket, pending, source)
+                    VALUES (:tid, :date, :name, :name, :amount, :cat, :bucket, :pending, :source)
+                    ON CONFLICT (transaction_id) DO NOTHING
+                """), {
+                    "tid": row['transaction_id'],
+                    "date": row['date'],
+                    "name": row['name'],
+                    "amount": row['amount'],
+                    "cat": row['category'],
+                    "bucket": row['bucket'],
+                    "pending": False,
+                    "source": row['source']
+                })
+                count += 1
+            except Exception as e:
+                pass 
+        conn.commit()
+    return count
 
-# --- MAIN APP LOGIC ---
+# --- APP LAYOUT ---
 st.set_page_config(page_title="Budget Upload", layout="wide")
-
-# 1. RUN INIT (Crucial Step!)
 init_db()
 
 st.title("📂 Bank Upload Dashboard")
 
-# 2. SIDEBAR UPLOAD
 with st.sidebar:
-    st.header("Upload Data")
-    uploaded_file = st.file_uploader("Upload Bank CSV", type=['csv'])
+    st.header("1. Select Bank")
+    # THE DROPDOWN YOU ASKED FOR
+    bank_choice = st.selectbox("Choose Bank Format", ["Chase", "Citi"])
     
-    if uploaded_file is not None:
-        try:
-            st.info("Processing file...")
-            clean_df = clean_bank_csv(uploaded_file)
-            st.dataframe(clean_df.head(3), hide_index=True) 
-            
-            if st.button("Confirm Upload"):
-                count = save_to_neon(clean_df)
-                st.success(f"Success! Added {count} new transactions.")
-                st.balloons()
-                # Rerun to show new data immediately
-                st.rerun()
-                
-        except Exception as e:
-            st.error(f"Error reading CSV: {e}")
+    st.header("2. Upload File")
+    uploaded_file = st.file_uploader(f"Upload {bank_choice} CSV", type=['csv'])
+    
+    if uploaded_file:
+        st.info(f"Processing as {bank_choice}...")
+        clean_df = clean_bank_csv(uploaded_file, bank_choice)
+        st.dataframe(clean_df.head(3), hide_index=True)
+        
+        if st.button("Confirm Upload", type="primary"):
+            count = save_to_neon(clean_df)
+            st.success(f"Success! Added {count} rows.")
+            st.rerun()
 
-# 3. VIEW DATA (Safe Loading)
-try:
-    conn = get_db_connection()
-    # Check if table has data
-    df = pd.read_sql("SELECT * FROM transactions ORDER BY date DESC LIMIT 50", conn)
+    st.divider()
     
+    # RESET BUTTON (Use this to fix your 'None' dates)
+    if st.button("⚠️ Delete All Transactions (Reset)"):
+        with get_db_connection().connect() as conn:
+            conn.execute(text("DELETE FROM transactions"))
+            conn.commit()
+        st.warning("Database wiped clean.")
+        st.rerun()
+
+# VIEW DATA
+try:
+    df = pd.read_sql("SELECT * FROM transactions ORDER BY date DESC LIMIT 50", get_db_connection())
     if df.empty:
-        st.info("No transactions found. Upload a CSV to get started!")
+        st.info("No data yet. Select a bank and upload a CSV!")
     else:
         st.subheader("Latest Transactions")
-        st.dataframe(df)
-        
-    conn.close()
+        st.dataframe(df, use_container_width=True)
 except Exception as e:
-    st.error(f"Error loading data: {e}")
+    st.error(f"Error loading view: {e}")
