@@ -48,40 +48,77 @@ def init_db():
 def clean_bank_csv(uploaded_file):
     df = pd.read_csv(uploaded_file)
     
-    # 1. Normalize headers to lowercase so "Amount", "amount", and "AMOUNT" all work
+    # 1. CLEAN HEADERS: lowercase, strip spaces
     df.columns = df.columns.str.strip().str.lower()
     
-    # 2. Map known bank columns to our standard names
-    # Key = Bank's column name (lowercase), Value = Our standard name
+    # DEBUG: Show the user what columns were actually found
+    st.write("🔍 Found these columns in your CSV:", df.columns.tolist())
+    
+    # 2. MAP COLUMNS: Add every variation you can think of here!
     column_map = {
+        # DATE variations
         'posting date': 'date',       # Chase
+        'post date': 'date',
+        'trans. date': 'date',
+        'transaction date': 'date',
+        'effective date': 'date',
         'date': 'date',               # Citi / Wells
+        
+        # NAME variations
         'description': 'name',        # Chase / Citi
-        'merchant name': 'name',      # Others
-        'amount': 'amount'            # Standard
+        'merchant name': 'name', 
+        'original description': 'name',
+        'transaction description': 'name',
+        
+        # AMOUNT variations
+        'amount': 'amount',
+        'credit': 'credit',
+        'debit': 'debit'
     }
+    
+    # Rename columns using the map
     df = df.rename(columns=column_map)
     
     # 3. Handle Citi-style "Debit" and "Credit" split
-    # If we don't have an 'amount' column yet, let's look for debit/credit
     if 'amount' not in df.columns:
         if 'debit' in df.columns and 'credit' in df.columns:
-            # Citi Logic: Amount = Credit (Income) - Debit (Spending)
-            # Fills blanks with 0 so the math doesn't break
             df['amount'] = df['credit'].fillna(0) - df['debit'].fillna(0)
         elif 'debit' in df.columns:
-             # Some exports only show debits
              df['amount'] = df['debit'].fillna(0) * -1
              
-    # 4. Crash prevention: If we STILL don't have an amount, raise a clear error
+    # 4. Crash prevention
     if 'amount' not in df.columns:
-        st.error(f"Could not find an Amount column! Your columns are: {list(df.columns)}")
+        st.error(f"❌ Could not find an Amount column! We found: {list(df.columns)}")
+        st.stop()
+    if 'date' not in df.columns:
+        st.error(f"❌ Could not find a Date column! We found: {list(df.columns)}")
         st.stop()
     
-    # 5. Cleanup Amount (Remove '$' and ',')
+    # 5. Cleanup Amount
     if df['amount'].dtype == 'object':
         df['amount'] = df['amount'].astype(str).str.replace('$', '').str.replace(',', '')
         df['amount'] = pd.to_numeric(df['amount'])
+        
+    # 6. Generate ID
+    def generate_id(row):
+        # Convert date to string to prevent "None" errors in hash
+        d = str(row.get('date', ''))
+        n = str(row.get('name', ''))
+        a = str(row.get('amount', ''))
+        raw = f"{d}{n}{a}"
+        return hashlib.md5(raw.encode()).hexdigest()
+
+    df['transaction_id'] = df.apply(generate_id, axis=1)
+    df['bucket'] = 'SPEND'
+    df['category'] = 'Uncategorized'
+    
+    # 7. Select Final Columns
+    required_cols = ['transaction_id', 'date', 'name', 'amount', 'category', 'bucket']
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = None 
+            
+    return df[required_cols]
         
     # 6. Generate ID
     def generate_id(row):
