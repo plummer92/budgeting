@@ -212,24 +212,47 @@ with tab2:
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.caption("Define rules (e.g., if Name contains 'Netflix', set to 'Subscriptions')")
+        st.caption("Create rules to auto-sort your transactions.")
         
-        # Load rules safely
+        # 1. FETCH UNIQUE MERCHANT NAMES FOR DROPDOWN
+        try:
+            # Get list of all unique names currently in your DB
+            unique_names = pd.read_sql("SELECT DISTINCT name FROM transactions ORDER BY name", get_db_connection())
+            merchant_list = unique_names['name'].tolist()
+        except:
+            merchant_list = []
+
+        # 2. LOAD RULES
         try:
             rules_df = pd.read_sql("SELECT * FROM category_rules ORDER BY rule_id", get_db_connection())
         except:
-            # Fallback if table is broken: Empty DF with correct columns
             rules_df = pd.DataFrame(columns=["rule_id", "keyword", "category", "bucket"])
 
-        # EDITOR
+        # 3. EDITOR WITH DROPDOWN
         edited_rules = st.data_editor(
             rules_df,
             num_rows="dynamic",
             column_config={
                 "rule_id": st.column_config.NumberColumn(disabled=True),
-                "keyword": "If Name Contains...",
-                "category": st.column_config.SelectboxColumn("Set Category", options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions"]),
-                "bucket": st.column_config.SelectboxColumn("Set Bucket", options=["SPEND", "BILL", "INCOME"])
+                
+                # UPDATED: Now a Dropdown of your actual merchants!
+                "keyword": st.column_config.SelectboxColumn(
+                    "If Name is...",
+                    options=merchant_list,
+                    required=True,
+                    width="large"
+                ),
+                
+                "category": st.column_config.SelectboxColumn(
+                    "Set Category", 
+                    options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions"],
+                    required=True
+                ),
+                "bucket": st.column_config.SelectboxColumn(
+                    "Set Bucket", 
+                    options=["SPEND", "BILL", "INCOME"],
+                    required=True
+                )
             },
             hide_index=True,
             key="rules_editor"
@@ -238,12 +261,9 @@ with tab2:
         if st.button("💾 Save Rules & Run Automation"):
             engine = get_db_connection()
             with engine.connect() as conn:
-                # 1. Clear old rules (Simple override)
                 conn.execute(text("TRUNCATE TABLE category_rules RESTART IDENTITY"))
                 
-                # 2. Insert new rules
                 for _, row in edited_rules.iterrows():
-                    # Check for empty rows
                     if row.get('keyword'): 
                         conn.execute(text("""
                             INSERT INTO category_rules (keyword, category, bucket)
@@ -251,24 +271,24 @@ with tab2:
                         """), {"kw": row['keyword'], "cat": row['category'], "bucket": row['bucket']})
                 conn.commit()
             
-            # 3. Run Automation
             matches = run_auto_categorization()
-            st.success(f"Rules saved! Automatically categorized {matches} transactions.")
+            st.success(f"Saved! Auto-categorized {matches} items.")
             st.rerun()
 
     with col2:
-        st.info("💡 Tip: Rules only apply to 'Uncategorized' items.")
-        # BUTTON TO FIX YOUR BROKEN DB
+        st.info("💡 Tip: Select a merchant name from the dropdown to automatically tag it everywhere.")
         if st.button("⚠️ Fix Database Schema"):
             with get_db_connection().connect() as conn:
                 conn.execute(text("DROP TABLE IF EXISTS category_rules"))
                 conn.commit()
-            st.warning("Rules table reset. Please reload.")
+            st.warning("Rules table reset. Reloading...")
             st.rerun()
 
     st.divider()
     
     st.header("📝 Manual Transaction Editor")
+    
+    # Load Transactions
     edit_df = pd.read_sql("SELECT * FROM transactions ORDER BY date DESC LIMIT 100", get_db_connection())
     
     edited_data = st.data_editor(
