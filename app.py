@@ -43,22 +43,42 @@ def init_db():
 # --- BANK PROCESSORS ---
 def process_chase(df):
     """Handles Chase CSV format"""
+    # 1. CLEAN HEADERS
     df.columns = df.columns.str.strip().str.lower()
     
-    # UPDATED MAPPING based on your error message
-    col_map = {
-        'post date': 'date',          # Found in your file
-        'transaction date': 'date',   # Found in your file
-        'posting date': 'date',       # Older Chase format
-        'name': 'name',               # Found in your file
-        'description': 'name',        # Older Chase format
-        'amount': 'amount'
-    }
-    df = df.rename(columns=col_map)
+    # 2. SMART RENAMING (Prevents duplicates)
+    # We check which columns exist and rename ONLY the best one.
     
-    # Validation
-    if 'date' not in df.columns or 'amount' not in df.columns:
-        st.error(f"❌ Chase Error: Missing columns. Found: {list(df.columns)}")
+    # Handle Date: Prefer 'post date', fallback to 'transaction date'
+    if 'post date' in df.columns:
+        df = df.rename(columns={'post date': 'date'})
+    elif 'transaction date' in df.columns:
+        df = df.rename(columns={'transaction date': 'date'})
+    elif 'posting date' in df.columns:
+        df = df.rename(columns={'posting date': 'date'})
+        
+    # Handle Name: Prefer 'description', fallback to 'merchant'
+    if 'description' in df.columns:
+        df = df.rename(columns={'description': 'name'})
+    elif 'merchant' in df.columns:
+        df = df.rename(columns={'merchant': 'name'})
+    elif 'name' in df.columns:
+        # It's already called name, do nothing
+        pass
+        
+    # Handle Amount (Chase is usually just 'amount')
+    if 'amount' not in df.columns:
+         st.error(f"❌ Chase Error: No 'amount' column found. Found: {list(df.columns)}")
+         st.stop()
+
+    # 3. DROP EXTRA COLUMNS (Safety Step)
+    # If the file still has 'transaction date' but we already have 'date', drop the extra to avoid confusion
+    cols_to_drop = ['transaction date', 'posting date', 'post date']
+    df = df.drop(columns=[c for c in cols_to_drop if c in df.columns and c != 'date'], errors='ignore')
+
+    # 4. VALIDATION
+    if 'date' not in df.columns:
+        st.error(f"❌ Chase Error: No suitable date column found. Found: {list(df.columns)}")
         st.stop()
         
     df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
