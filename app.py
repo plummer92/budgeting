@@ -23,6 +23,7 @@ def get_db_connection():
 def init_db():
     engine = get_db_connection()
     with engine.connect() as conn:
+        # Create table with ALL columns (including source)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS transactions (
                 transaction_id TEXT PRIMARY KEY, 
@@ -43,64 +44,41 @@ def init_db():
 # --- BANK PROCESSORS ---
 def process_chase(df):
     """Handles Chase CSV format"""
-    # 1. CLEAN HEADERS
-    df.columns = df.columns.str.strip().str.lower()
+    # 1. Clean Headers
+    df.columns = df.columns.str.strip().str.lower().str.replace('\ufeff', '')
     
-    # 2. SMART RENAMING (Prevents duplicates)
-    # We check which columns exist and rename ONLY the best one.
-    
-    # Handle Date: Prefer 'post date', fallback to 'transaction date'
+    # 2. Smart Map
     if 'post date' in df.columns:
         df = df.rename(columns={'post date': 'date'})
     elif 'transaction date' in df.columns:
         df = df.rename(columns={'transaction date': 'date'})
-    elif 'posting date' in df.columns:
-        df = df.rename(columns={'posting date': 'date'})
         
-    # Handle Name: Prefer 'description', fallback to 'merchant'
     if 'description' in df.columns:
         df = df.rename(columns={'description': 'name'})
     elif 'merchant' in df.columns:
         df = df.rename(columns={'merchant': 'name'})
-    elif 'name' in df.columns:
-        # It's already called name, do nothing
-        pass
-        
-    # Handle Amount (Chase is usually just 'amount')
-    if 'amount' not in df.columns:
-         st.error(f"❌ Chase Error: No 'amount' column found. Found: {list(df.columns)}")
-         st.stop()
 
-    # 3. DROP EXTRA COLUMNS (Safety Step)
-    # If the file still has 'transaction date' but we already have 'date', drop the extra to avoid confusion
-    cols_to_drop = ['transaction date', 'posting date', 'post date']
-    df = df.drop(columns=[c for c in cols_to_drop if c in df.columns and c != 'date'], errors='ignore')
-
-    # 4. VALIDATION
+    # 3. Validation
     if 'date' not in df.columns:
-        st.error(f"❌ Chase Error: No suitable date column found. Found: {list(df.columns)}")
+        st.error(f"❌ Chase Error: Could not find Date column. Found: {list(df.columns)}")
         st.stop()
         
+    # 4. Dates
     df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
     df['source'] = 'Chase'
     return df
 
 def process_citi(df):
     """Handles Citi CSV format"""
-    df.columns = df.columns.str.strip().str.lower()
+    df.columns = df.columns.str.strip().str.lower().str.replace('\ufeff', '')
     
-    col_map = {
-        'date': 'date',
-        'description': 'name',
-        'merchant name': 'name'
-    }
+    col_map = {'date': 'date', 'description': 'name', 'merchant name': 'name'}
     df = df.rename(columns=col_map)
     
-    # Ensure Debit/Credit exist
+    # Amount Math
     if 'debit' not in df.columns: df['debit'] = 0
     if 'credit' not in df.columns: df['credit'] = 0
     
-    # Calculate Amount
     if 'amount' not in df.columns:
         df['amount'] = df['credit'].fillna(0) - df['debit'].fillna(0)
     
@@ -111,9 +89,8 @@ def process_citi(df):
 # --- MAIN CLEANER ---
 def clean_bank_csv(uploaded_file, bank_choice):
     try:
-        df = pd.read_csv(uploaded_file)
+        df = pd.read_csv(uploaded_file, encoding='utf-8-sig') # Handle special chars
         
-        # Route to processor
         if bank_choice == "Chase":
             df = process_chase(df)
         elif bank_choice == "Citi":
@@ -150,7 +127,7 @@ def save_to_neon(df):
     engine = get_db_connection()
     count = 0
     with engine.connect() as conn:
-        for _, row in df.iterrows():
+        for index, row in df.iterrows():
             try:
                 conn.execute(text("""
                     INSERT INTO transactions (transaction_id, date, name, merchant_name, amount, category, bucket, pending, source)
@@ -162,8 +139,11 @@ def save_to_neon(df):
                     "pending": False, "source": row['source']
                 })
                 count += 1
-            except Exception:
-                pass
+            except Exception as e:
+                # 🛑 LOUD ERROR: Show the user exactly why it failed
+                st.error(f"Failed to save row {index}: {e}")
+                # We stop here so you don't get 1000 errors
+                st.stop()
         conn.commit()
     return count
 
@@ -181,27 +161,32 @@ with st.sidebar:
     uploaded_file = st.file_uploader(f"Upload {bank_choice} CSV", type=['csv'])
     
     if uploaded_file:
-        st.info(f"Processing as {bank_choice}...")
+        st.info(f"Processing {bank_choice}...")
         clean_df = clean_bank_csv(uploaded_file, bank_choice)
         st.dataframe(clean_df.head(3), hide_index=True)
         
         if st.button("Confirm Upload", type="primary"):
             count = save_to_neon(clean_df)
             st.success(f"Success! Added {count} rows.")
+            st.balloons()
             st.rerun()
 
     st.divider()
-    if st.button("⚠️ Delete All Transactions (Reset)"):
+    # THIS IS THE BUTTON YOU NEED
+    if st.button("💥 Nuke & Reset Database (DROP TABLE)"):
         with get_db_connection().connect() as conn:
-            conn.execute(text("DELETE FROM transactions"))
+            conn.execute(text("DROP TABLE IF EXISTS transactions"))
             conn.commit()
-        st.warning("Database wiped clean.")
+        st.warning("Table Dropped. It will be recreated on next reload.")
         st.rerun()
 
+# VIEW DATA
 try:
     df = pd.read_sql("SELECT * FROM transactions ORDER BY date DESC LIMIT 50", get_db_connection())
     if not df.empty:
         st.subheader("Latest Transactions")
         st.dataframe(df, use_container_width=True)
+    else:
+        st.info("Database is empty. Upload a file!")
 except Exception as e:
-    st.error(f"Error loading view: {e}")
+    st.error(f"View Error: {e}")
