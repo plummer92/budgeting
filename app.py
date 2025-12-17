@@ -143,17 +143,12 @@ with tab1:
     if df.empty:
         st.info("No data for this month.")
     else:
-        # Spending Logic (Ignore TRANSFERS)
         week_spend = df[
             (pd.to_datetime(df['date']) >= start_of_week) & 
             (pd.to_datetime(df['date']) <= end_of_week) &
-            (df['bucket'] == 'SPEND')  # Only count SPEND bucket
+            (df['bucket'] == 'SPEND')
         ]['amount'].sum()
         
-        # Income Logic (Ignore Payments/Transfers)
-        income = df[(df['amount'] > 0) & (df['bucket'] == 'INCOME')]['amount'].sum()
-        
-        # Hardcoded Budget
         weekly_allowance = (4000 - 1500) / 4 
         
         col1, col2, col3 = st.columns(3)
@@ -164,7 +159,6 @@ with tab1:
         
         c1, c2 = st.columns(2)
         with c1:
-            # Chart: Exclude Transfers
             spend_df = df[(df['amount'] < 0) & (df['bucket'] == 'SPEND')].copy()
             if not spend_df.empty:
                 spend_df['amount'] = spend_df['amount'].abs()
@@ -176,16 +170,18 @@ with tab1:
 with tab2:
     st.header("⚡ Auto-Categorization Rules")
     
-    try:
-        unique_names = pd.read_sql("SELECT DISTINCT name FROM transactions ORDER BY name", get_db_connection())
-        merchant_list = unique_names['name'].tolist()
-    except: merchant_list = []
-        
+    # 1. ADD RULE FORM (Switched to Text Input)
     with st.form("add_rule_form"):
         c1, c2, c3 = st.columns([2, 1, 1])
-        with c1: new_keyword = st.selectbox("If Name Contains...", options=merchant_list, index=None, placeholder="Select merchant...")
-        with c2: new_cat = st.selectbox("Set Category", options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay"])
-        with c3: new_bucket = st.selectbox("Set Bucket", options=["SPEND", "BILL", "INCOME", "TRANSFER"]) # <--- Added TRANSFER
+        with c1: 
+            st.caption("Type a keyword (e.g. 'Amazon' or 'Shell')")
+            new_keyword = st.text_input("If Name Contains...", placeholder="e.g. Amazon")
+        with c2: 
+            st.caption("Choose Category")
+            new_cat = st.selectbox("Category", options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay"])
+        with c3: 
+            st.caption("Choose Bucket")
+            new_bucket = st.selectbox("Bucket", options=["SPEND", "BILL", "INCOME", "TRANSFER"])
             
         if st.form_submit_button("➕ Add Rule") and new_keyword:
             with get_db_connection().connect() as conn:
@@ -193,6 +189,8 @@ with tab2:
                              {"kw": new_keyword, "cat": new_cat, "bucket": new_bucket})
                 conn.commit()
             st.success(f"Rule added for '{new_keyword}'!")
+            # Run automation immediately
+            run_auto_categorization()
             st.rerun()
 
     st.divider()
@@ -201,7 +199,7 @@ with tab2:
     todo_df = pd.read_sql("SELECT * FROM transactions WHERE category = 'Uncategorized' ORDER BY date DESC", get_db_connection())
     
     if todo_df.empty:
-        st.success("🎉 You have no uncategorized transactions! Great job!")
+        st.success("🎉 All transactions categorized!")
     else:
         st.caption(f"You have {len(todo_df)} transactions to sort.")
         edited_todo = st.data_editor(
@@ -223,12 +221,12 @@ with tab2:
                             UPDATE transactions SET category = :cat, bucket = :bucket WHERE transaction_id = :tid
                         """), {"cat": row['category'], "bucket": row['bucket'], "tid": row['transaction_id']})
                         conn.commit()
-            st.success("Saved! Items moved to history.")
+            st.success("Saved!")
             st.rerun()
 
     st.divider()
 
-    with st.expander("✅ Categorized History (Click to View/Edit)"):
+    with st.expander("✅ Categorized History"):
         done_df = pd.read_sql("SELECT * FROM transactions WHERE category != 'Uncategorized' ORDER BY date DESC LIMIT 50", get_db_connection())
         
         edited_done = st.data_editor(
@@ -249,7 +247,7 @@ with tab2:
                         UPDATE transactions SET category = :cat, bucket = :bucket WHERE transaction_id = :tid
                     """), {"cat": row['category'], "bucket": row['bucket'], "tid": row['transaction_id']})
                     conn.commit()
-            st.success("History updated!")
+            st.success("Updated!")
             st.rerun()
 
 # === TAB 3: UPLOAD & SETTINGS ===
