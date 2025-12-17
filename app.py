@@ -111,14 +111,22 @@ tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "📝 Edit Categories", "📂 Uplo
 with tab1:
     st.header("Weekly Envelope Status")
     
-    # 1. Get Data for Current Month
+    # 1. Get Data for Current Month (FIXED)
     current_month = datetime.now().strftime('%Y-%m')
-    query = f"SELECT * FROM transactions WHERE date::text LIKE '{current_month}%'"
-    df = pd.read_sql(query, get_db_connection())
+    
+    # We use a context manager (with ... as conn) for safety
+    with get_db_connection().connect() as conn:
+        # We use text() and :month to safely handle the '%' wildcard
+        query = text("SELECT * FROM transactions WHERE date::text LIKE :month")
+        df = pd.read_sql(query, conn, params={"month": f"{current_month}%"})
     
     if df.empty:
         st.info("No data found for this month.")
     else:
+        # ... (The rest of your code remains exactly the same)
+        # 2. Calculate "The Envelope"
+        income = df[df['amount'] > 0]['amount'].sum()
+        # ...
         # 2. Calculate "The Envelope"
         # Logic: Income - Bills = Spending Money
         income = df[df['amount'] > 0]['amount'].sum()
