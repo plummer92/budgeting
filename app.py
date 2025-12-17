@@ -25,11 +25,22 @@ def get_db_connection():
 def init_db():
     engine = get_db_connection()
     with engine.connect() as conn:
+        # 1. Transactions Table
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS transactions (
                 transaction_id TEXT PRIMARY KEY, date DATE, name TEXT, merchant_name TEXT, 
                 amount NUMERIC, category TEXT, bucket TEXT, pending BOOLEAN, 
                 manual_category TEXT, manual_bucket TEXT, source TEXT
+            );
+        """))
+        
+        # 2. Rules Table (NEW)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS category_rules (
+                rule_id SERIAL PRIMARY KEY,
+                keyword TEXT NOT NULL,
+                category TEXT NOT NULL,
+                bucket TEXT NOT NULL
             );
         """))
         conn.commit()
