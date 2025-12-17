@@ -113,6 +113,27 @@ def save_to_neon(df):
         conn.commit()
     return count
 
+def run_auto_categorization():
+    engine = get_db_connection()
+    with engine.connect() as conn:
+        # 1. Get all rules
+        rules = pd.read_sql("SELECT * FROM category_rules", conn)
+        
+        count = 0
+        # 2. Apply each rule using SQL ILIKE (Case-insensitive search)
+        for _, rule in rules.iterrows():
+            keyword = f"%{rule['keyword']}%"
+            result = conn.execute(text("""
+                UPDATE transactions 
+                SET category = :cat, bucket = :bucket
+                WHERE name ILIKE :kw 
+                AND category = 'Uncategorized'  -- Only touch uncategorized items
+            """), {"cat": rule['category'], "bucket": rule['bucket'], "kw": keyword})
+            count += result.rowcount
+            
+        conn.commit()
+    return count
+
 # --- TABS LOGIC ---
 
 init_db()
@@ -187,41 +208,75 @@ with tab1:
             st.subheader("Recent Activity")
             st.dataframe(df[['date', 'name', 'amount', 'category', 'bucket']].sort_values('date', ascending=False).head(10), hide_index=True)
 
-# === TAB 2: EDIT CATEGORIES ===
+# === TAB 2: RULES & EDITS ===
 with tab2:
-    st.header("Transaction Manager")
-    st.write("Edit categories here. Changes save automatically.")
+    st.header("⚡ Auto-Categorization Rules")
     
-    # Load all data
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.caption("Define rules here (e.g., if Name contains 'Netflix', set to 'Subscriptions')")
+        # Load existing rules
+        rules_df = pd.read_sql("SELECT * FROM category_rules ORDER BY rule_id", get_db_connection())
+        
+        # Editable Rules Grid
+        edited_rules = st.data_editor(
+            rules_df,
+            num_rows="dynamic", # Allows adding new rows!
+            column_config={
+                "rule_id": st.column_config.NumberColumn(disabled=True),
+                "keyword": "If Name Contains...",
+                "category": st.column_config.SelectboxColumn("Set Category", options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions"]),
+                "bucket": st.column_config.SelectboxColumn("Set Bucket", options=["SPEND", "BILL", "INCOME"])
+            },
+            hide_index=True,
+            key="rules_editor"
+        )
+
+        if st.button("💾 Save Rules & Run Automation"):
+            engine = get_db_connection()
+            with engine.connect() as conn:
+                # 1. Wipe and Rewrite Rules (Simple sync)
+                # Note: In a huge production app we'd diff changes, but this is fine for personal use
+                conn.execute(text("TRUNCATE TABLE category_rules RESTART IDENTITY"))
+                
+                # 2. Insert new rules
+                for _, row in edited_rules.iterrows():
+                    if row['keyword']: # Skip empty rows
+                        conn.execute(text("""
+                            INSERT INTO category_rules (keyword, category, bucket)
+                            VALUES (:kw, :cat, :bucket)
+                        """), {"kw": row['keyword'], "cat": row['category'], "bucket": row['bucket']})
+                conn.commit()
+            
+            # 3. Run the automation immediately
+            matches = run_auto_categorization()
+            st.success(f"Rules saved! Automatically categorized {matches} transactions.")
+            st.rerun()
+
+    with col2:
+        st.info("💡 Tip: Rules only apply to 'Uncategorized' items so they don't overwrite your manual changes.")
+
+    st.divider()
+    
+    st.header("📝 Manual Transaction Editor")
+    # Load Transactions
     edit_df = pd.read_sql("SELECT * FROM transactions ORDER BY date DESC LIMIT 100", get_db_connection())
     
-    # Editable Grid
     edited_data = st.data_editor(
         edit_df,
         column_config={
-            "category": st.column_config.SelectboxColumn(
-                "Category",
-                options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Uncategorized"],
-                required=True,
-            ),
-            "bucket": st.column_config.SelectboxColumn(
-                "Bucket",
-                options=["SPEND", "BILL", "INCOME"],
-                required=True,
-            )
+            "category": st.column_config.SelectboxColumn("Category", options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Uncategorized"]),
+            "bucket": st.column_config.SelectboxColumn("Bucket", options=["SPEND", "BILL", "INCOME"])
         },
         disabled=["transaction_id", "source", "date", "name", "amount"],
         hide_index=True,
-        key="editor"
+        key="tx_editor"
     )
     
-    # Save Button logic
-    if st.button("💾 Save Changes"):
+    if st.button("💾 Save Manual Edits"):
         engine = get_db_connection()
         with engine.connect() as conn:
-            # We iterate through the edited dataframe in session state
-            # Note: For production, we usually check 'st.session_state["editor"]["edited_rows"]'
-            # But creating a loop is safer for simple apps.
             for index, row in edited_data.iterrows():
                 conn.execute(text("""
                     UPDATE transactions 
@@ -229,9 +284,8 @@ with tab2:
                     WHERE transaction_id = :tid
                 """), {"cat": row['category'], "bucket": row['bucket'], "tid": row['transaction_id']})
                 conn.commit()
-        st.success("Updates saved!")
+        st.success("Manual edits saved!")
         st.rerun()
-
 # === TAB 3: UPLOAD (Kept Safe) ===
 with tab3:
     st.header("Upload New Data")
