@@ -170,7 +170,13 @@ with tab1:
 with tab2:
     st.header("⚡ Auto-Categorization Rules")
     
-    # 1. ADD RULE FORM (Switched to Text Input)
+    # DEFINE CATEGORY LIST
+    CAT_OPTIONS = [
+        "Groceries", "Dining Out", "Rent", "Utilities", "Shopping", 
+        "Transport", "Income", "Subscriptions", "Credit Card Pay",
+        "Home Improvement", "Pets", "RX"  # <--- NEW CATEGORIES ADDED
+    ]
+    
     with st.form("add_rule_form"):
         c1, c2, c3 = st.columns([2, 1, 1])
         with c1: 
@@ -178,7 +184,7 @@ with tab2:
             new_keyword = st.text_input("If Name Contains...", placeholder="e.g. Amazon")
         with c2: 
             st.caption("Choose Category")
-            new_cat = st.selectbox("Category", options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay"])
+            new_cat = st.selectbox("Category", options=CAT_OPTIONS)
         with c3: 
             st.caption("Choose Bucket")
             new_bucket = st.selectbox("Bucket", options=["SPEND", "BILL", "INCOME", "TRANSFER"])
@@ -189,7 +195,6 @@ with tab2:
                              {"kw": new_keyword, "cat": new_cat, "bucket": new_bucket})
                 conn.commit()
             st.success(f"Rule added for '{new_keyword}'!")
-            # Run automation immediately
             run_auto_categorization()
             st.rerun()
 
@@ -205,7 +210,7 @@ with tab2:
         edited_todo = st.data_editor(
             todo_df,
             column_config={
-                "category": st.column_config.SelectboxColumn("Category", options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay"]),
+                "category": st.column_config.SelectboxColumn("Category", options=CAT_OPTIONS),
                 "bucket": st.column_config.SelectboxColumn("Bucket", options=["SPEND", "BILL", "INCOME", "TRANSFER"])
             },
             disabled=["transaction_id", "source", "date", "name", "amount"],
@@ -232,7 +237,7 @@ with tab2:
         edited_done = st.data_editor(
             done_df,
             column_config={
-                "category": st.column_config.SelectboxColumn("Category", options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay"]),
+                "category": st.column_config.SelectboxColumn("Category", options=CAT_OPTIONS),
                 "bucket": st.column_config.SelectboxColumn("Bucket", options=["SPEND", "BILL", "INCOME", "TRANSFER"])
             },
             disabled=["transaction_id", "source", "date", "name", "amount"],
