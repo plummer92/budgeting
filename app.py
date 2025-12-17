@@ -65,7 +65,6 @@ def run_auto_categorization():
 def clean_bank_csv(uploaded_file, bank_choice):
     try:
         df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
-        # Simple processors nested here for brevity
         df.columns = df.columns.str.strip().str.lower().str.replace('\ufeff', '')
         
         if bank_choice == "Chase":
@@ -129,7 +128,15 @@ tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "⚡ Rules & Edits", "📂 Upload 
 
 # === TAB 1: DASHBOARD ===
 with tab1:
-    st.header("Weekly Envelope Status")
+    # 1. Calculate Date Range (Mon - Sun)
+    today = datetime.now()
+    # weekday() returns 0 for Monday, 6 for Sunday
+    start_of_week = today - timedelta(days=today.weekday())
+    end_of_week = start_of_week + timedelta(days=6)
+    
+    date_label = f"{start_of_week.strftime('%b %d')} - {end_of_week.strftime('%b %d')}"
+    st.header(f"Weekly Envelope Status ({date_label})")
+    
     current_month = datetime.now().strftime('%Y-%m')
     with get_db_connection().connect() as conn:
         query = text("SELECT * FROM transactions WHERE date::text LIKE :month")
@@ -138,10 +145,14 @@ with tab1:
     if df.empty:
         st.info("No data for this month.")
     else:
-        income = df[df['amount'] > 0]['amount'].sum()
-        week_spend = df[(pd.to_datetime(df['date']) >= (datetime.now() - timedelta(days=datetime.now().weekday()))) & (df['bucket'] == 'SPEND')]['amount'].sum()
+        # Spending Logic
+        week_spend = df[
+            (pd.to_datetime(df['date']) >= start_of_week) & 
+            (pd.to_datetime(df['date']) <= end_of_week) &
+            (df['bucket'] == 'SPEND')
+        ]['amount'].sum()
         
-        # Hardcoded Budget
+        # Hardcoded Budget (You can change these numbers)
         weekly_allowance = (4000 - 1500) / 4 
         
         col1, col2, col3 = st.columns(3)
@@ -159,11 +170,10 @@ with tab1:
         with c2:
             st.dataframe(df[['date', 'name', 'amount', 'category']].sort_values('date', ascending=False).head(10), hide_index=True)
 
-# === TAB 2: RULES & EDITS (UPDATED!) ===
+# === TAB 2: RULES & EDITS ===
 with tab2:
     st.header("⚡ Auto-Categorization Rules")
     
-    # 1. ADD RULE FORM
     try:
         unique_names = pd.read_sql("SELECT DISTINCT name FROM transactions ORDER BY name", get_db_connection())
         merchant_list = unique_names['name'].tolist()
@@ -185,10 +195,7 @@ with tab2:
 
     st.divider()
 
-    # 2. TO DO LIST (Uncategorized Only)
     st.subheader("📝 Action Items (Uncategorized)")
-    
-    # FILTER: Only show 'Uncategorized'
     todo_df = pd.read_sql("SELECT * FROM transactions WHERE category = 'Uncategorized' ORDER BY date DESC", get_db_connection())
     
     if todo_df.empty:
@@ -209,22 +216,17 @@ with tab2:
         if st.button("💾 Save & Clear Sorted Items"):
             with get_db_connection().connect() as conn:
                 for index, row in edited_todo.iterrows():
-                    # Only update if the user actually changed it from Uncategorized
                     if row['category'] != 'Uncategorized':
                         conn.execute(text("""
                             UPDATE transactions SET category = :cat, bucket = :bucket WHERE transaction_id = :tid
                         """), {"cat": row['category'], "bucket": row['bucket'], "tid": row['transaction_id']})
                         conn.commit()
-            st.success("Saved! Sorted items have moved to the history list below.")
+            st.success("Saved! Items moved to history.")
             st.rerun()
 
     st.divider()
 
-    # 3. DONE LIST (Categorized History)
     with st.expander("✅ Categorized History (Click to View/Edit)"):
-        st.caption("These are already finished. You can edit them here if you made a mistake.")
-        
-        # FILTER: Show everything NOT 'Uncategorized'
         done_df = pd.read_sql("SELECT * FROM transactions WHERE category != 'Uncategorized' ORDER BY date DESC LIMIT 50", get_db_connection())
         
         edited_done = st.data_editor(
@@ -248,7 +250,7 @@ with tab2:
             st.success("History updated!")
             st.rerun()
 
-# === TAB 3: UPLOAD ===
+# === TAB 3: UPLOAD & SETTINGS ===
 with tab3:
     st.header("Upload New Data")
     bank_choice = st.selectbox("Select Bank", ["Chase", "Citi"])
@@ -259,4 +261,30 @@ with tab3:
         if st.button("Confirm Upload", type="primary"):
             count = save_to_neon(clean_df)
             st.success(f"Added {count} rows!")
+            st.rerun()
+
+    st.divider()
+    
+    # --- PRUNE DATA TOOL (NEW!) ---
+    st.subheader("⚠️ Prune Old Data")
+    st.write("Too much history? Use this to delete everything before a certain date.")
+    
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        # Default date set to 2025-10-01 as you requested
+        cutoff_date = st.date_input("Delete all transactions BEFORE:", value=pd.to_datetime("2025-10-01"))
+    
+    with col_b:
+        st.write("") # Spacer
+        st.write("") # Spacer
+        if st.button("🗑️ Delete Old Data", type="primary"):
+            with get_db_connection().connect() as conn:
+                # SQL Query to delete data
+                result = conn.execute(
+                    text("DELETE FROM transactions WHERE date < :cutoff"), 
+                    {"cutoff": cutoff_date}
+                )
+                conn.commit()
+                deleted_rows = result.rowcount
+            st.success(f"Cleaned up! Deleted {deleted_rows} old transactions.")
             st.rerun()
