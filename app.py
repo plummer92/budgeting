@@ -128,9 +128,7 @@ tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "⚡ Rules & Edits", "📂 Upload 
 
 # === TAB 1: DASHBOARD ===
 with tab1:
-    # 1. Calculate Date Range (Mon - Sun)
     today = datetime.now()
-    # weekday() returns 0 for Monday, 6 for Sunday
     start_of_week = today - timedelta(days=today.weekday())
     end_of_week = start_of_week + timedelta(days=6)
     
@@ -145,14 +143,17 @@ with tab1:
     if df.empty:
         st.info("No data for this month.")
     else:
-        # Spending Logic
+        # Spending Logic (Ignore TRANSFERS)
         week_spend = df[
             (pd.to_datetime(df['date']) >= start_of_week) & 
             (pd.to_datetime(df['date']) <= end_of_week) &
-            (df['bucket'] == 'SPEND')
+            (df['bucket'] == 'SPEND')  # Only count SPEND bucket
         ]['amount'].sum()
         
-        # Hardcoded Budget (You can change these numbers)
+        # Income Logic (Ignore Payments/Transfers)
+        income = df[(df['amount'] > 0) & (df['bucket'] == 'INCOME')]['amount'].sum()
+        
+        # Hardcoded Budget
         weekly_allowance = (4000 - 1500) / 4 
         
         col1, col2, col3 = st.columns(3)
@@ -163,7 +164,8 @@ with tab1:
         
         c1, c2 = st.columns(2)
         with c1:
-            spend_df = df[df['amount'] < 0].copy()
+            # Chart: Exclude Transfers
+            spend_df = df[(df['amount'] < 0) & (df['bucket'] == 'SPEND')].copy()
             if not spend_df.empty:
                 spend_df['amount'] = spend_df['amount'].abs()
                 st.plotly_chart(px.pie(spend_df, values='amount', names='category', hole=0.4), use_container_width=True)
@@ -182,8 +184,8 @@ with tab2:
     with st.form("add_rule_form"):
         c1, c2, c3 = st.columns([2, 1, 1])
         with c1: new_keyword = st.selectbox("If Name Contains...", options=merchant_list, index=None, placeholder="Select merchant...")
-        with c2: new_cat = st.selectbox("Set Category", options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions"])
-        with c3: new_bucket = st.selectbox("Set Bucket", options=["SPEND", "BILL", "INCOME"])
+        with c2: new_cat = st.selectbox("Set Category", options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay"])
+        with c3: new_bucket = st.selectbox("Set Bucket", options=["SPEND", "BILL", "INCOME", "TRANSFER"]) # <--- Added TRANSFER
             
         if st.form_submit_button("➕ Add Rule") and new_keyword:
             with get_db_connection().connect() as conn:
@@ -205,8 +207,8 @@ with tab2:
         edited_todo = st.data_editor(
             todo_df,
             column_config={
-                "category": st.column_config.SelectboxColumn("Category", options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Uncategorized"]),
-                "bucket": st.column_config.SelectboxColumn("Bucket", options=["SPEND", "BILL", "INCOME"])
+                "category": st.column_config.SelectboxColumn("Category", options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay"]),
+                "bucket": st.column_config.SelectboxColumn("Bucket", options=["SPEND", "BILL", "INCOME", "TRANSFER"])
             },
             disabled=["transaction_id", "source", "date", "name", "amount"],
             hide_index=True,
@@ -232,8 +234,8 @@ with tab2:
         edited_done = st.data_editor(
             done_df,
             column_config={
-                "category": st.column_config.SelectboxColumn("Category", options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Uncategorized"]),
-                "bucket": st.column_config.SelectboxColumn("Bucket", options=["SPEND", "BILL", "INCOME"])
+                "category": st.column_config.SelectboxColumn("Category", options=["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay"]),
+                "bucket": st.column_config.SelectboxColumn("Bucket", options=["SPEND", "BILL", "INCOME", "TRANSFER"])
             },
             disabled=["transaction_id", "source", "date", "name", "amount"],
             hide_index=True,
@@ -265,21 +267,15 @@ with tab3:
 
     st.divider()
     
-    # --- PRUNE DATA TOOL (NEW!) ---
     st.subheader("⚠️ Prune Old Data")
-    st.write("Too much history? Use this to delete everything before a certain date.")
-    
     col_a, col_b = st.columns([2, 1])
     with col_a:
-        # Default date set to 2025-10-01 as you requested
         cutoff_date = st.date_input("Delete all transactions BEFORE:", value=pd.to_datetime("2025-10-01"))
-    
     with col_b:
-        st.write("") # Spacer
-        st.write("") # Spacer
+        st.write("") 
+        st.write("") 
         if st.button("🗑️ Delete Old Data", type="primary"):
             with get_db_connection().connect() as conn:
-                # SQL Query to delete data
                 result = conn.execute(
                     text("DELETE FROM transactions WHERE date < :cutoff"), 
                     {"cutoff": cutoff_date}
