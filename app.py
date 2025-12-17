@@ -12,7 +12,7 @@ load_dotenv()
 # --- CONFIG ---
 st.set_page_config(page_title="My Weekly Budget", layout="wide", page_icon="💰")
 
-# --- DATABASE ---
+# --- DATABASE CONNECTION ---
 def get_db_connection():
     db_url = os.getenv("DATABASE_URL")
     if not db_url and "DATABASE_URL" in st.secrets:
@@ -22,6 +22,7 @@ def get_db_connection():
         st.stop()
     return create_engine(db_url.replace("postgres://", "postgresql://"))
 
+# --- DB INIT (With Rules Table) ---
 def init_db():
     engine = get_db_connection()
     with engine.connect() as conn:
@@ -34,7 +35,7 @@ def init_db():
             );
         """))
         
-        # 2. Rules Table (NEW)
+        # 2. Rules Table (This was likely missing or broken before)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS category_rules (
                 rule_id SERIAL PRIMARY KEY,
@@ -45,7 +46,31 @@ def init_db():
         """))
         conn.commit()
 
-# --- DATA PROCESSING (Your Working Code) ---
+# --- HELPER FUNCTIONS ---
+def run_auto_categorization():
+    """Applies rules to uncategorized transactions"""
+    engine = get_db_connection()
+    count = 0
+    with engine.connect() as conn:
+        # Get rules
+        rules = pd.read_sql("SELECT * FROM category_rules", conn)
+        if rules.empty:
+            return 0
+            
+        for _, rule in rules.iterrows():
+            keyword = f"%{rule['keyword']}%"
+            # Postgres ILIKE is case-insensitive
+            result = conn.execute(text("""
+                UPDATE transactions 
+                SET category = :cat, bucket = :bucket
+                WHERE name ILIKE :kw 
+                AND category = 'Uncategorized'
+            """), {"cat": rule['category'], "bucket": rule['bucket'], "kw": keyword})
+            count += result.rowcount
+        conn.commit()
+    return count
+
+# --- DATA CLEANING (Same as before) ---
 def process_chase(df):
     df.columns = df.columns.str.strip().str.lower().str.replace('\ufeff', '')
     if 'post date' in df.columns: df = df.rename(columns={'post date': 'date'})
@@ -113,68 +138,39 @@ def save_to_neon(df):
         conn.commit()
     return count
 
-def run_auto_categorization():
-    engine = get_db_connection()
-    with engine.connect() as conn:
-        # 1. Get all rules
-        rules = pd.read_sql("SELECT * FROM category_rules", conn)
-        
-        count = 0
-        # 2. Apply each rule using SQL ILIKE (Case-insensitive search)
-        for _, rule in rules.iterrows():
-            keyword = f"%{rule['keyword']}%"
-            result = conn.execute(text("""
-                UPDATE transactions 
-                SET category = :cat, bucket = :bucket
-                WHERE name ILIKE :kw 
-                AND category = 'Uncategorized'  -- Only touch uncategorized items
-            """), {"cat": rule['category'], "bucket": rule['bucket'], "kw": keyword})
-            count += result.rowcount
-            
-        conn.commit()
-    return count
+# --- APP START ---
+init_db() # Run DB check on startup
 
-# --- TABS LOGIC ---
-
-init_db()
-tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "📝 Edit Categories", "📂 Upload Data"])
+# TABS
+tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "⚡ Rules & Edits", "📂 Upload Data"])
 
 # === TAB 1: DASHBOARD ===
 with tab1:
     st.header("Weekly Envelope Status")
     
-    # 1. Get Data for Current Month (FIXED)
     current_month = datetime.now().strftime('%Y-%m')
     
-    # We use a context manager (with ... as conn) for safety
+    # Safe Query with Params
     with get_db_connection().connect() as conn:
-        # We use text() and :month to safely handle the '%' wildcard
         query = text("SELECT * FROM transactions WHERE date::text LIKE :month")
         df = pd.read_sql(query, conn, params={"month": f"{current_month}%"})
     
     if df.empty:
-        st.info("No data found for this month.")
+        st.info(f"No transactions found for {datetime.now().strftime('%B %Y')}. Upload data in Tab 3!")
     else:
-        # ... (The rest of your code remains exactly the same)
-        # 2. Calculate "The Envelope"
-        income = df[df['amount'] > 0]['amount'].sum()
-        # ...
-        # 2. Calculate "The Envelope"
-        # Logic: Income - Bills = Spending Money
+        # Calculate Logic
         income = df[df['amount'] > 0]['amount'].sum()
         bills = df[(df['amount'] < 0) & (df['bucket'] == 'BILL')]['amount'].sum()
         spending = df[(df['amount'] < 0) & (df['bucket'] == 'SPEND')]['amount'].sum()
         
-        # Hardcoded estimate for demo (You can make these inputs later)
+        # NOTE: You can make these dynamic inputs later
         ESTIMATED_INCOME = 4000 
         ESTIMATED_BILLS = 1500
         
-        # Math
         pool = ESTIMATED_INCOME - ESTIMATED_BILLS
         weeks_in_month = 4
         weekly_allowance = pool / weeks_in_month
         
-        # Determine current week spending
         today = datetime.now()
         start_week = today - timedelta(days=today.weekday())
         week_spend = df[
@@ -182,27 +178,28 @@ with tab1:
             (df['bucket'] == 'SPEND')
         ]['amount'].sum()
         
-        # 3. Display Metrics
+        # Metrics
         col1, col2, col3 = st.columns(3)
         col1.metric("Weekly Allowance", f"${weekly_allowance:,.0f}")
         col2.metric("Spent This Week", f"${abs(week_spend):,.2f}")
         col3.metric("Remaining", f"${(weekly_allowance - abs(week_spend)):,.2f}", 
                     delta_color="normal" if (weekly_allowance - abs(week_spend)) > 0 else "inverse")
         
-        # 4. Progress Bar
+        # Progress
         progress = min(abs(week_spend) / weekly_allowance, 1.0) if weekly_allowance > 0 else 0
         st.progress(progress)
-        st.caption(f"You have used {int(progress*100)}% of your weekly budget.")
         
-        # 5. Charts
+        # Charts
         c1, c2 = st.columns(2)
         with c1:
             st.subheader("Spending by Category")
-            # Filter only negative amounts (spending)
             spend_df = df[df['amount'] < 0].copy()
-            spend_df['amount'] = spend_df['amount'].abs()
-            fig = px.pie(spend_df, values='amount', names='category', hole=0.4)
-            st.plotly_chart(fig, use_container_width=True)
+            if not spend_df.empty:
+                spend_df['amount'] = spend_df['amount'].abs()
+                fig = px.pie(spend_df, values='amount', names='category', hole=0.4)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.caption("No spending yet.")
             
         with c2:
             st.subheader("Recent Activity")
@@ -215,14 +212,19 @@ with tab2:
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.caption("Define rules here (e.g., if Name contains 'Netflix', set to 'Subscriptions')")
-        # Load existing rules
-        rules_df = pd.read_sql("SELECT * FROM category_rules ORDER BY rule_id", get_db_connection())
+        st.caption("Define rules (e.g., if Name contains 'Netflix', set to 'Subscriptions')")
         
-        # Editable Rules Grid
+        # Load rules safely
+        try:
+            rules_df = pd.read_sql("SELECT * FROM category_rules ORDER BY rule_id", get_db_connection())
+        except:
+            # Fallback if table is broken: Empty DF with correct columns
+            rules_df = pd.DataFrame(columns=["rule_id", "keyword", "category", "bucket"])
+
+        # EDITOR
         edited_rules = st.data_editor(
             rules_df,
-            num_rows="dynamic", # Allows adding new rows!
+            num_rows="dynamic",
             column_config={
                 "rule_id": st.column_config.NumberColumn(disabled=True),
                 "keyword": "If Name Contains...",
@@ -236,31 +238,37 @@ with tab2:
         if st.button("💾 Save Rules & Run Automation"):
             engine = get_db_connection()
             with engine.connect() as conn:
-                # 1. Wipe and Rewrite Rules (Simple sync)
-                # Note: In a huge production app we'd diff changes, but this is fine for personal use
+                # 1. Clear old rules (Simple override)
                 conn.execute(text("TRUNCATE TABLE category_rules RESTART IDENTITY"))
                 
                 # 2. Insert new rules
                 for _, row in edited_rules.iterrows():
-                    if row['keyword']: # Skip empty rows
+                    # Check for empty rows
+                    if row.get('keyword'): 
                         conn.execute(text("""
                             INSERT INTO category_rules (keyword, category, bucket)
                             VALUES (:kw, :cat, :bucket)
                         """), {"kw": row['keyword'], "cat": row['category'], "bucket": row['bucket']})
                 conn.commit()
             
-            # 3. Run the automation immediately
+            # 3. Run Automation
             matches = run_auto_categorization()
             st.success(f"Rules saved! Automatically categorized {matches} transactions.")
             st.rerun()
 
     with col2:
-        st.info("💡 Tip: Rules only apply to 'Uncategorized' items so they don't overwrite your manual changes.")
+        st.info("💡 Tip: Rules only apply to 'Uncategorized' items.")
+        # BUTTON TO FIX YOUR BROKEN DB
+        if st.button("⚠️ Fix Database Schema"):
+            with get_db_connection().connect() as conn:
+                conn.execute(text("DROP TABLE IF EXISTS category_rules"))
+                conn.commit()
+            st.warning("Rules table reset. Please reload.")
+            st.rerun()
 
     st.divider()
     
     st.header("📝 Manual Transaction Editor")
-    # Load Transactions
     edit_df = pd.read_sql("SELECT * FROM transactions ORDER BY date DESC LIMIT 100", get_db_connection())
     
     edited_data = st.data_editor(
@@ -286,7 +294,8 @@ with tab2:
                 conn.commit()
         st.success("Manual edits saved!")
         st.rerun()
-# === TAB 3: UPLOAD (Kept Safe) ===
+
+# === TAB 3: UPLOAD ===
 with tab3:
     st.header("Upload New Data")
     bank_choice = st.selectbox("Select Bank", ["Chase", "Citi"])
