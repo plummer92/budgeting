@@ -91,7 +91,7 @@ def process_sofi(df):
 def process_chime_pdf(uploaded_file):
     """
     Extracts transactions from Chime PDF Statements.
-    Supports formats: "Sep 28" AND "09/28/2025"
+    Bulletproof version: Handles missing columns gracefully.
     """
     transactions = []
     
@@ -100,133 +100,68 @@ def process_chime_pdf(uploaded_file):
     year_match = re.search(r'20\d{2}', filename)
     default_year = year_match.group(0) if year_match else str(datetime.now().year)
 
-    with pdfplumber.open(uploaded_file) as pdf:
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                for row in table:
-                    # Clean the row
-                    clean_row = [str(x).strip() if x else '' for x in row]
-                    
-                    # Need at least Date and Amount
-                    if len(clean_row) < 2: continue
-                    
-                    # 1. DETECT DATE (Col 0)
-                    date_str = clean_row[0]
-                    
-                    # Regex for "Sep 28" OR "09/30/2025"
-                    # Matches: (Mon DD) OR (M/D/YY) OR (M/D/YYYY)
-                    date_match = re.match(r'([A-Z][a-z]{2}\s\d{1,2})|(\d{1,2}/\d{1,2}/\d{2,4})', date_str)
-                    
-                    if not date_match:
-                        continue
+    try:
+        with pdfplumber.open(uploaded_file) as pdf:
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                for table in tables:
+                    for row in table:
+                        # Clean the row
+                        clean_row = [str(x).strip() if x else '' for x in row]
                         
-                    # 2. FIND DESCRIPTION
-                    # Sometimes Chime has an empty column between Date and Desc
-                    # We look for the first non-empty text after column 0
-                    description = "Unknown"
-                    for col_idx in range(1, len(clean_row)):
-                        if clean_row[col_idx] and '$' not in clean_row[col_idx]:
-                            description = clean_row[col_idx]
-                            break
-                    
-                    # 3. FIND AMOUNT
-                    # Search backwards from the end for something with a '.' or '$'
-                    amount = 0.0
-                    for col_in_reverse in reversed(clean_row):
-                        if ('$' in col_in_reverse or '.' in col_in_reverse) and len(col_in_reverse) < 20:
-                            try:
-                                clean_amt = col_in_reverse.replace('$', '').replace(',', '').replace(' ', '')
-                                if '(' in clean_amt:
-                                    amount = -float(clean_amt.replace('(', '').replace(')', ''))
-                                else:
-                                    amount = float(clean_amt)
-                                break # Found it
-                            except:
-                                continue
+                        # Need at least Date and Amount
+                        if len(clean_row) < 2: continue
+                        
+                        # 1. DETECT DATE (Col 0)
+                        date_str = clean_row[0]
+                        
+                        # Regex for "Sep 28" OR "09/30/2025"
+                        date_match = re.match(r'([A-Z][a-z]{2}\s\d{1,2})|(\d{1,2}/\d{1,2}/\d{2,4})', date_str)
+                        if not date_match:
+                            continue
+                            
+                        # 2. FIND DESCRIPTION
+                        description = "Unknown"
+                        for col_idx in range(1, len(clean_row)):
+                            if clean_row[col_idx] and '$' not in clean_row[col_idx]:
+                                description = clean_row[col_idx]
+                                break
+                        
+                        # 3. FIND AMOUNT
+                        amount = 0.0
+                        for col_in_reverse in reversed(clean_row):
+                            if ('$' in col_in_reverse or '.' in col_in_reverse) and len(col_in_reverse) < 20:
+                                try:
+                                    clean_amt = col_in_reverse.replace('$', '').replace(',', '').replace(' ', '')
+                                    if '(' in clean_amt:
+                                        amount = -float(clean_amt.replace('(', '').replace(')', ''))
+                                    else:
+                                        amount = float(clean_amt)
+                                    break 
+                                except:
+                                    continue
 
-                    # 4. APPEND
-                    # If date is like "9/30/2025", use it directly. 
-                    # If "Sep 30", add the year.
-                    final_date = date_str
-                    if '/' not in date_str:
-                        final_date = f"{date_str}, {default_year}"
+                        # 4. HANDLE YEAR
+                        final_date = date_str
+                        if '/' not in date_str:
+                            final_date = f"{date_str}, {default_year}"
 
-                    transactions.append({
-                        'date': final_date,
-                        'name': description,
-                        'amount': amount,
-                        'source': 'Chime PDF'
-                    })
-    
-    # If parsing failed completely, return empty with columns to prevent crash
+                        transactions.append({
+                            'date': final_date,
+                            'name': description,
+                            'amount': amount,
+                            'source': 'Chime PDF'
+                        })
+    except Exception as e:
+        st.warning(f"PDF Parsing warning: {e}")
+
+    # FORCE DATAFRAME CREATION WITH COLUMNS
     if not transactions:
+        st.warning("⚠️ No transactions found in this PDF. Check the file format.")
         return pd.DataFrame(columns=['date', 'name', 'amount', 'source'])
                         
     return pd.DataFrame(transactions)
 
-# --- PDF PROCESSOR (NEW!) ---
-def process_chime_pdf(uploaded_file):
-    """
-    Extracts transactions from Chime PDF Statements.
-    Assumes standard Chime format: Date | Description | ... | Amount
-    """
-    transactions = []
-    
-    # Try to guess year from filename (e.g., "September-2025")
-    filename = uploaded_file.name
-    year_match = re.search(r'20\d{2}', filename)
-    default_year = year_match.group(0) if year_match else str(datetime.now().year)
-
-    with pdfplumber.open(uploaded_file) as pdf:
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                for row in table:
-                    # Chime rows usually start with a date like "Sep 28"
-                    # We clean the row to remove None/Empty
-                    clean_row = [str(x).strip() if x else '' for x in row]
-                    
-                    if len(clean_row) < 3: continue
-                    
-                    # 1. Detect Date (Col 0)
-                    date_str = clean_row[0]
-                    # Regex for "Mon DD" (e.g. Sep 28)
-                    if not re.match(r'[A-Z][a-z]{2}\s\d{1,2}', date_str):
-                        continue
-                        
-                    # 2. Detect Amount (Usually last column with $)
-                    amount_str = clean_row[-1]
-                    if '$' not in amount_str and '.' not in amount_str:
-                        # Sometimes amount is 2nd to last if there is a Balance column
-                        amount_str = clean_row[-2]
-
-                    try:
-                        # Clean currency string
-                        clean_amount = amount_str.replace('$', '').replace(',', '').replace(' ', '')
-                        
-                        # Handle Negatives: Chime sometimes uses ($10.00) or -10.00
-                        if '(' in clean_amount:
-                            amount = -float(clean_amount.replace('(', '').replace(')', ''))
-                        else:
-                            amount = float(clean_amount)
-                        
-                        # Chime logic: Purchases are usually listed as positive numbers in "Spending" sections
-                        # or negative in general ledgers. 
-                        # SAFETY: If Description contains "Payment" or "Deposit", it's income (+).
-                        # If it's a merchant, it's spend (-).
-                        # Let's trust the sign for now, but user might need to flip it in review.
-                        
-                        transactions.append({
-                            'date': f"{date_str}, {default_year}", # Add year to string
-                            'name': clean_row[1], # Description is usually col 2
-                            'amount': amount,
-                            'source': 'Chime PDF'
-                        })
-                    except:
-                        continue
-                        
-    return pd.DataFrame(transactions)
 
 def clean_bank_file(uploaded_file, bank_choice):
     try:
