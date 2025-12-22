@@ -281,7 +281,7 @@ with tab1:
 with tab2:
     st.header("⚡ Auto-Categorization Rules")
     
-    CAT_OPTIONS = ["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement", "Pets", "RX"]
+    CAT_OPTIONS = ["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement", "Pets", "RX", "Savings"]
     
     with st.form("add_rule_form"):
         c1, c2, c3 = st.columns([2, 1, 1])
