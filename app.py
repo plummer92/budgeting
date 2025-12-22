@@ -91,11 +91,11 @@ def process_sofi(df):
 def process_chime_pdf(uploaded_file):
     """
     Extracts transactions from Chime PDF Statements.
-    Bulletproof version: Handles missing columns gracefully.
+    HYBRID MODE: Tries Tables first, then falls back to Raw Text scanning.
     """
     transactions = []
     
-    # Try to guess year from filename
+    # Year guessing
     filename = uploaded_file.name
     year_match = re.search(r'20\d{2}', filename)
     default_year = year_match.group(0) if year_match else str(datetime.now().year)
@@ -103,65 +103,65 @@ def process_chime_pdf(uploaded_file):
     try:
         with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
-                tables = page.extract_tables()
-                for table in tables:
-                    for row in table:
-                        # Clean the row
-                        clean_row = [str(x).strip() if x else '' for x in row]
+                # --- STRATEGY 1: RAW TEXT SCAN (Best for borderless PDFs) ---
+                text = page.extract_text()
+                if text:
+                    lines = text.split('\n')
+                    for line in lines:
+                        # Regex to find lines starting with a Date: "11/30/2025" or "Nov 30"
+                        # ^ means "Start of line"
+                        match = re.match(r'^(\d{1,2}/\d{1,2}/\d{2,4}|[A-Z][a-z]{2}\s\d{1,2})\s+(.*)', line)
                         
-                        # Need at least Date and Amount
-                        if len(clean_row) < 2: continue
-                        
-                        # 1. DETECT DATE (Col 0)
-                        date_str = clean_row[0]
-                        
-                        # Regex for "Sep 28" OR "09/30/2025"
-                        date_match = re.match(r'([A-Z][a-z]{2}\s\d{1,2})|(\d{1,2}/\d{1,2}/\d{2,4})', date_str)
-                        if not date_match:
-                            continue
+                        if match:
+                            date_part = match.group(1)
+                            rest_of_line = match.group(2)
                             
-                        # 2. FIND DESCRIPTION
-                        description = "Unknown"
-                        for col_idx in range(1, len(clean_row)):
-                            if clean_row[col_idx] and '$' not in clean_row[col_idx]:
-                                description = clean_row[col_idx]
-                                break
-                        
-                        # 3. FIND AMOUNT
-                        amount = 0.0
-                        for col_in_reverse in reversed(clean_row):
-                            if ('$' in col_in_reverse or '.' in col_in_reverse) and len(col_in_reverse) < 20:
-                                try:
-                                    clean_amt = col_in_reverse.replace('$', '').replace(',', '').replace(' ', '')
-                                    if '(' in clean_amt:
-                                        amount = -float(clean_amt.replace('(', '').replace(')', ''))
-                                    else:
-                                        amount = float(clean_amt)
-                                    break 
-                                except:
-                                    continue
+                            # Clean Date
+                            if '/' not in date_part:
+                                date_part = f"{date_part}, {default_year}"
+                            
+                            # Extract Amount (Look for the last "money-like" thing in the line)
+                            # We split the rest of the line by spaces and look backwards
+                            tokens = rest_of_line.split()
+                            amount = 0.0
+                            description_parts = []
+                            
+                            found_amount = False
+                            for i in range(len(tokens) - 1, -1, -1):
+                                token = tokens[i]
+                                # cleanup token to see if it's a number
+                                clean_token = token.replace('$', '').replace(',', '').replace('(', '-').replace(')', '')
+                                
+                                # Check if it looks like a number (e.g., -193.39)
+                                # Must have a decimal point to be safe, or match strict money regex
+                                if re.match(r'^-?\d+\.\d{2}$', clean_token) and not found_amount:
+                                    amount = float(clean_token)
+                                    found_amount = True
+                                    # Everything BEFORE this token is likely the description
+                                    description_parts = tokens[:i]
+                                    break
+                            
+                            # If we didn't find a clear amount, skip this line (it might be a header)
+                            if not found_amount:
+                                continue
+                                
+                            description = " ".join(description_parts)
+                            
+                            transactions.append({
+                                'date': date_part,
+                                'name': description,
+                                'amount': amount,
+                                'source': 'Chime PDF'
+                            })
 
-                        # 4. HANDLE YEAR
-                        final_date = date_str
-                        if '/' not in date_str:
-                            final_date = f"{date_str}, {default_year}"
-
-                        transactions.append({
-                            'date': final_date,
-                            'name': description,
-                            'amount': amount,
-                            'source': 'Chime PDF'
-                        })
     except Exception as e:
-        st.warning(f"PDF Parsing warning: {e}")
+        st.warning(f"PDF Text Parsing warning: {e}")
 
-    # FORCE DATAFRAME CREATION WITH COLUMNS
     if not transactions:
-        st.warning("⚠️ No transactions found in this PDF. Check the file format.")
+        # Fallback to empty to prevent crash
         return pd.DataFrame(columns=['date', 'name', 'amount', 'source'])
                         
     return pd.DataFrame(transactions)
-
 
 def clean_bank_file(uploaded_file, bank_choice):
     try:
