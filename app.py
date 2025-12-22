@@ -24,7 +24,7 @@ def get_db_connection():
         st.stop()
     return create_engine(db_url.replace("postgres://", "postgresql://"))
 
-# --- DB INIT (Now with Settings Table) ---
+# --- DB INIT ---
 def init_db():
     engine = get_db_connection()
     with engine.connect() as conn:
@@ -43,7 +43,6 @@ def init_db():
                 bucket TEXT NOT NULL
             );
         """))
-        # NEW: Table to store your Budget Inputs (Income/Bills)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS budget_settings (
                 key_name TEXT PRIMARY KEY,
@@ -54,15 +53,12 @@ def init_db():
 
 # --- HELPERS ---
 def get_budget_setting(key, default_val):
-    """Fetches a setting like 'est_income' from DB"""
     with get_db_connection().connect() as conn:
         result = conn.execute(text("SELECT value FROM budget_settings WHERE key_name = :k"), {"k": key}).fetchone()
-        if result:
-            return float(result[0])
+        if result: return float(result[0])
         return float(default_val)
 
 def set_budget_setting(key, value):
-    """Saves a setting to DB"""
     with get_db_connection().connect() as conn:
         conn.execute(text("""
             INSERT INTO budget_settings (key_name, value) VALUES (:k, :v)
@@ -72,51 +68,20 @@ def set_budget_setting(key, value):
 
 def run_auto_categorization():
     engine = get_db_connection()
-    count = 0
     with engine.connect() as conn:
         rules = pd.read_sql("SELECT * FROM category_rules", conn)
-        if rules.empty: return 0
+        if rules.empty: return
         for _, rule in rules.iterrows():
             keyword = f"%{rule['keyword']}%"
-            result = conn.execute(text("""
+            conn.execute(text("""
                 UPDATE transactions 
                 SET category = :cat, bucket = :bucket
                 WHERE name ILIKE :kw 
                 AND category = 'Uncategorized'
             """), {"cat": rule['category'], "bucket": rule['bucket'], "kw": keyword})
-            count += result.rowcount
-        conn.commit()
-    return count
+            conn.commit()
 
 # --- FILE PROCESSORS ---
-def process_chase(df):
-    if 'post date' in df.columns: df = df.rename(columns={'post date': 'date'})
-    elif 'transaction date' in df.columns: df = df.rename(columns={'transaction date': 'date'})
-    if 'description' in df.columns: df = df.rename(columns={'description': 'name'})
-    elif 'merchant' in df.columns: df = df.rename(columns={'merchant': 'name'})
-    df['source'] = 'Chase'
-    return df
-
-def process_citi(df):
-    df = df.rename(columns={'date': 'date', 'description': 'name', 'merchant name': 'name'})
-    if 'debit' not in df.columns: df['debit'] = 0
-    if 'credit' not in df.columns: df['credit'] = 0
-    if 'amount' not in df.columns: df['amount'] = df['credit'].fillna(0) - df['debit'].fillna(0)
-    df['source'] = 'Citi'
-    return df
-
-def process_sofi(df):
-    if 'payment date' in df.columns: df = df.rename(columns={'payment date': 'date'})
-    elif 'posted date' in df.columns: df = df.rename(columns={'posted date': 'date'})
-    df = df.rename(columns={'description': 'name'})
-    df['source'] = 'Sofi'
-    return df
-
-def process_chime_csv(df):
-    df = df.rename(columns={'transaction date': 'date', 'description': 'name'})
-    df['source'] = 'Chime'
-    return df
-
 def process_chime_pdf(uploaded_file):
     transactions = []
     filename = uploaded_file.name
@@ -150,12 +115,7 @@ def process_chime_pdf(uploaded_file):
                                     break
                             
                             if found_amount:
-                                transactions.append({
-                                    'date': date_part,
-                                    'name': " ".join(description_parts),
-                                    'amount': amount,
-                                    'source': 'Chime PDF'
-                                })
+                                transactions.append({'date': date_part, 'name': " ".join(description_parts), 'amount': amount, 'source': 'Chime PDF'})
     except Exception as e: st.warning(f"PDF Error: {e}")
     if not transactions: return pd.DataFrame(columns=['date', 'name', 'amount', 'source'])
     return pd.DataFrame(transactions)
@@ -165,10 +125,23 @@ def clean_bank_file(uploaded_file, bank_choice):
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
             df.columns = df.columns.str.strip().str.lower().str.replace('\ufeff', '')
-            if bank_choice == "Chase": df = process_chase(df)
-            elif bank_choice == "Citi": df = process_citi(df)
-            elif bank_choice == "Sofi": df = process_sofi(df)
-            elif bank_choice == "Chime": df = process_chime_csv(df)
+            # Simple mapping logic
+            if bank_choice == "Chase": 
+                if 'post date' in df.columns: df = df.rename(columns={'post date': 'date'})
+                elif 'transaction date' in df.columns: df = df.rename(columns={'transaction date': 'date'})
+                if 'description' in df.columns: df = df.rename(columns={'description': 'name'})
+            elif bank_choice == "Citi":
+                df = df.rename(columns={'date': 'date', 'description': 'name'})
+                if 'debit' not in df.columns: df['debit'] = 0
+                if 'credit' not in df.columns: df['credit'] = 0
+                if 'amount' not in df.columns: df['amount'] = df['credit'].fillna(0) - df['debit'].fillna(0)
+            elif bank_choice == "Sofi":
+                if 'payment date' in df.columns: df = df.rename(columns={'payment date': 'date'})
+                df = df.rename(columns={'description': 'name'})
+            elif bank_choice == "Chime":
+                df = df.rename(columns={'transaction date': 'date', 'description': 'name'})
+            df['source'] = bank_choice
+            
         elif uploaded_file.name.endswith('.pdf') and bank_choice == "Chime":
             df = process_chime_pdf(uploaded_file)
         else:
@@ -180,11 +153,7 @@ def clean_bank_file(uploaded_file, bank_choice):
             df['amount'] = pd.to_numeric(df['amount'])
             
         df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
-        
-        def generate_id(row):
-            return hashlib.md5(f"{row.get('date')}{row.get('name')}{row.get('amount')}".encode()).hexdigest()
-
-        df['transaction_id'] = df.apply(generate_id, axis=1)
+        df['transaction_id'] = df.apply(lambda row: hashlib.md5(f"{row.get('date')}{row.get('name')}{row.get('amount')}".encode()).hexdigest(), axis=1)
         df['bucket'] = 'SPEND'
         df['category'] = 'Uncategorized'
         
@@ -216,9 +185,9 @@ def save_to_neon(df):
 
 # --- MAIN APP ---
 init_db()
-tab1, tab_month, tab2, tab3 = st.tabs(["📊 Weekly Dashboard", "📅 Monthly Overview", "⚡ Rules", "📂 Upload"])
+tab1, tab_insights, tab_month, tab2, tab3 = st.tabs(["📊 Dashboard", "💡 Insights (New!)", "📅 Monthly", "⚡ Rules", "📂 Upload"])
 
-# === TAB 1: WEEKLY DASHBOARD (With Calc Explorer) ===
+# === TAB 1: WEEKLY DASHBOARD ===
 with tab1:
     col_date, col_set = st.columns([2, 1])
     with col_date:
@@ -227,21 +196,14 @@ with tab1:
         end_of_week = start_of_week + timedelta(days=6)
         st.caption(f"Showing: {start_of_week.strftime('%b %d')} - {end_of_week.strftime('%b %d')}")
 
-    # --- CALCULATION EXPLORER ---
     with col_set:
         with st.expander("⚙️ Budget Settings"):
-            # Load from DB
             est_income = get_budget_setting("est_income", 4000.0)
             est_bills = get_budget_setting("est_bills", 1500.0)
-            
-            new_income = st.number_input("Est. Monthly Income", value=est_income)
-            new_bills = st.number_input("Est. Monthly Fixed Bills", value=est_bills)
-            
-            if st.button("Save Settings"):
-                set_budget_setting("est_income", new_income)
-                set_budget_setting("est_bills", new_bills)
-                st.success("Saved!")
-                st.rerun()
+            new_income = st.number_input("Income", value=est_income)
+            new_bills = st.number_input("Fixed Bills", value=est_bills)
+            if st.button("Save"):
+                set_budget_setting("est_income", new_income); set_budget_setting("est_bills", new_bills); st.rerun()
 
     with get_db_connection().connect() as conn:
         df = pd.read_sql("SELECT * FROM transactions", conn)
@@ -253,200 +215,163 @@ with tab1:
         week_df = df[(df['date'] >= pd.Timestamp(start_of_week)) & (df['date'] <= pd.Timestamp(end_of_week))].copy()
         week_spend = week_df[(week_df['bucket'] == 'SPEND')]['amount'].sum()
         
-        # --- THE MATH ---
         discretionary_pool = new_income - new_bills
         weekly_allowance = discretionary_pool / 4
         remaining = weekly_allowance - abs(week_spend)
         
-        # DISPLAY METRICS
         c1, c2, c3 = st.columns(3)
         c1.metric("Weekly Allowance", f"${weekly_allowance:,.0f}")
         c2.metric("Spent This Week", f"${abs(week_spend):,.2f}")
         c3.metric("Remaining", f"${remaining:,.2f}", delta_color="normal" if remaining > 0 else "inverse")
-        
         st.progress(min(abs(week_spend) / weekly_allowance, 1.0) if weekly_allowance > 0 else 0)
         
-        # --- THE EXPLORER ---
-        with st.expander("🧮 Calculation Explorer (How we got these numbers)"):
-            st.markdown(f"""
-            **1. The Monthly Pool**
-            We start with your Income (**${new_income:,.0f}**) and subtract your Fixed Bills (**${new_bills:,.0f}**).
-            > Result: **${discretionary_pool:,.0f}** available for "Fun/Spending" this month.
-            
-            **2. The Weekly Slice**
-            We divide that pool by **4 weeks** to be safe.
-            > ${discretionary_pool:,.0f} ÷ 4 = **${weekly_allowance:,.0f} per week**.
-            
-            **3. The Reality Check**
-            You have spent **${abs(week_spend):,.2f}** so far this week.
-            > ${weekly_allowance:,.0f} - ${abs(week_spend):,.2f} = **${remaining:,.2f} left**.
-            """)
-
         st.divider()
-        # Charts
         c1, c2 = st.columns(2)
         with c1:
             spend_df = week_df[(week_df['amount'] < 0) & (week_df['bucket'] == 'SPEND')].copy()
             if not spend_df.empty:
                 spend_df['amount'] = spend_df['amount'].abs()
-                st.plotly_chart(px.pie(spend_df, values='amount', names='category', hole=0.4, title="This Week's Spending"), use_container_width=True)
-            else: st.info("No spending this week.")
+                st.plotly_chart(px.pie(spend_df, values='amount', names='category', hole=0.4), use_container_width=True)
         with c2:
             st.dataframe(week_df[['date', 'name', 'amount', 'category']].sort_values('date', ascending=False), hide_index=True, use_container_width=True)
 
-# === TAB 2: MONTHLY OVERVIEW (NEW!) ===
+# === TAB 2: INSIGHTS (THE "WHAT IF" MACHINE) ===
+with tab_insights:
+    st.header("💡 Spending Insights")
+    st.caption("How could you have saved money this week?")
+    
+    if week_df.empty:
+        st.info("No data for this week to analyze.")
+    else:
+        # 1. IDENTIFY "WANTS"
+        # We consider these categories as potential "cuts"
+        wants_cats = ["Dining Out", "Shopping", "Gambling", "Subscriptions", "Entertainment", "Personal Loan"]
+        
+        wants_df = week_df[
+            (week_df['category'].isin(wants_cats)) & 
+            (week_df['bucket'] == 'SPEND') & 
+            (week_df['amount'] < 0)
+        ].copy()
+        
+        total_wants = abs(wants_df['amount'].sum())
+        
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            st.subheader("The 'Wants' Analysis")
+            st.metric("Spent on Non-Essentials", f"${total_wants:,.2f}")
+            st.write("These are categories like Dining Out, Shopping, and Gambling.")
+            
+            if total_wants > 0:
+                pct_of_spend = (total_wants / abs(week_spend)) * 100
+                st.write(f"⚠️ This made up **{pct_of_spend:.1f}%** of your total spending this week.")
+
+        with col2:
+            st.subheader("✂️ The 'What If' Machine")
+            st.write("Uncheck categories to see how much you COULD have saved.")
+            
+            # Interactive Filter
+            all_cats_present = week_df[(week_df['amount'] < 0) & (week_df['bucket'] == 'SPEND')]['category'].unique()
+            selected_cats = st.multiselect(
+                "Categories included in spending:", 
+                options=all_cats_present, 
+                default=all_cats_present
+            )
+            
+            # Recalculate based on selection
+            filtered_spend = week_df[
+                (week_df['category'].isin(selected_cats)) & 
+                (week_df['bucket'] == 'SPEND') & 
+                (week_df['amount'] < 0)
+            ]['amount'].sum()
+            
+            # Show the "Alternative Reality"
+            new_remaining = weekly_allowance - abs(filtered_spend)
+            
+            m1, m2 = st.columns(2)
+            m1.metric("New Spending Total", f"${abs(filtered_spend):,.2f}")
+            m2.metric("New Remaining Balance", f"${new_remaining:,.2f}", 
+                      delta_color="normal" if new_remaining > 0 else "inverse")
+            
+            if new_remaining > 0 and remaining < 0:
+                st.success("🎉 Cutting those categories would have kept you UNDER budget!")
+
+        st.divider()
+        
+        # 2. TOP OFFENDERS
+        st.subheader("🏆 Top Spending Locations")
+        top_merchants = week_df[(week_df['amount'] < 0) & (week_df['bucket'] == 'SPEND')] \
+            .groupby('name')['amount'].sum().abs().sort_values(ascending=False).head(5)
+        
+        if not top_merchants.empty:
+            st.bar_chart(top_merchants)
+            st.caption("These 5 places took the most money this week.")
+
+# === TAB 3: MONTHLY ===
 with tab_month:
     st.header("📅 Monthly Overview")
-    
-    # 1. Select Month
     sel_date = st.date_input("Select Month:", value=datetime.now(), key="month_picker")
     start_month = sel_date.replace(day=1)
-    # Logic to get end of month
     next_month = (start_month.replace(day=28) + timedelta(days=4)).replace(day=1)
     end_month = next_month - timedelta(days=1)
     
-    st.caption(f"Analyzing: {start_month.strftime('%B 1')} - {end_month.strftime('%B %d, %Y')}")
-    
     if not df.empty:
-        # Filter for Month
         month_df = df[(df['date'] >= pd.Timestamp(start_month)) & (df['date'] <= pd.Timestamp(end_month))].copy()
-        
-        if month_df.empty:
-            st.info("No transactions found for this month.")
-        else:
-            # 2. High Level Stats
-            # Income = Positive amounts in INCOME bucket
-            total_income = month_df[(month_df['amount'] > 0) & (month_df['bucket'] == 'INCOME')]['amount'].sum()
+        if not month_df.empty:
+            ti = month_df[(month_df['amount'] > 0) & (month_df['bucket'] == 'INCOME')]['amount'].sum()
+            tb = month_df[(month_df['amount'] < 0) & (month_df['bucket'] == 'BILL')]['amount'].sum()
+            ts = month_df[(month_df['amount'] < 0) & (month_df['bucket'] == 'SPEND')]['amount'].sum()
+            net = ti + tb + ts
             
-            # Bills = Negative amounts in BILL bucket
-            total_bills = month_df[(month_df['amount'] < 0) & (month_df['bucket'] == 'BILL')]['amount'].sum()
-            
-            # Spend = Negative amounts in SPEND bucket
-            total_spend = month_df[(month_df['amount'] < 0) & (month_df['bucket'] == 'SPEND')]['amount'].sum()
-            
-            # Savings Transfers (Optional view)
-            total_savings = month_df[(month_df['category'] == 'Savings')]['amount'].sum()
-
-            # Net
-            net_result = total_income + total_bills + total_spend # Bills/Spend are negative
-            
-            # Metrics
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Total Income", f"${total_income:,.2f}")
-            m2.metric("Fixed Bills", f"${abs(total_bills):,.2f}")
-            m3.metric("Discretionary Spend", f"${abs(total_spend):,.2f}")
-            m4.metric("Net Result (Saved)", f"${net_result:,.2f}", delta_color="normal" if net_result > 0 else "inverse")
+            m1.metric("Income", f"${ti:,.0f}")
+            m2.metric("Bills", f"${abs(tb):,.0f}")
+            m3.metric("Spending", f"${abs(ts):,.0f}")
+            m4.metric("Net Saved", f"${net:,.2f}", delta_color="normal" if net > 0 else "inverse")
             
-            st.divider()
-            
-            # 3. Monthly Charts
-            mc1, mc2 = st.columns(2)
-            with mc1:
-                # Bar Chart: Spending by Category
-                # Get all outflows (Spend + Bills)
-                outflows = month_df[month_df['amount'] < 0].copy()
-                outflows['amount'] = outflows['amount'].abs()
-                if not outflows.empty:
-                    fig = px.bar(outflows, x='category', y='amount', color='bucket', title="Where did the money go?")
-                    st.plotly_chart(fig, use_container_width=True)
-            
-            with mc2:
-                # Pie Chart: Spending Bucket Ratios
-                if not outflows.empty:
-                    fig2 = px.pie(outflows, values='amount', names='bucket', title="Bills vs. Spending")
-                    st.plotly_chart(fig2, use_container_width=True)
+            outflows = month_df[month_df['amount'] < 0].copy()
+            outflows['amount'] = outflows['amount'].abs()
+            if not outflows.empty:
+                st.plotly_chart(px.bar(outflows, x='category', y='amount', color='bucket'), use_container_width=True)
 
-
-# === TAB 3: RULES & EDITS ===
+# === TAB 4: RULES ===
 with tab2:
     st.header("⚡ Rules & Edits")
     CAT_OPTIONS = ["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement", "Pets", "RX", "Savings", "Gambling", "Personal Loan"]
     
-    # --- 1. ADD NEW RULE ---
     with st.expander("➕ Add New Auto-Rule", expanded=True):
         with st.form("add_rule"):
             c1, c2, c3 = st.columns([2, 1, 1])
-            with c1: nk = st.text_input("If Name Contains...", placeholder="e.g. Walmart")
-            with c2: nc = st.selectbox("Set Category", CAT_OPTIONS)
-            with c3: nb = st.selectbox("Set Bucket", ["SPEND", "BILL", "INCOME", "TRANSFER"])
-            
-            if st.form_submit_button("Save Rule") and nk:
+            with c1: nk = st.text_input("Name Contains...", placeholder="e.g. Walmart")
+            with c2: nc = st.selectbox("Category", CAT_OPTIONS)
+            with c3: nb = st.selectbox("Bucket", ["SPEND", "BILL", "INCOME", "TRANSFER"])
+            if st.form_submit_button("Save") and nk:
                 with get_db_connection().connect() as conn:
-                    conn.execute(text("INSERT INTO category_rules (keyword, category, bucket) VALUES (:k,:c,:b)"), {"k":nk,"c":nc,"b":nb})
-                    conn.commit()
-                run_auto_categorization()
-                st.success(f"Rule saved for '{nk}'!")
-                st.rerun()
+                    conn.execute(text("INSERT INTO category_rules (keyword, category, bucket) VALUES (:k,:c,:b)"), {"k":nk,"c":nc,"b":nb}); conn.commit()
+                run_auto_categorization(); st.rerun()
 
-    st.divider()
-
-    # --- 2. UNCATEGORIZED ITEMS (Action Items) ---
-    st.subheader("🚨 Action Items (Uncategorized)")
-    todo = pd.read_sql("SELECT * FROM transactions WHERE category='Uncategorized' ORDER BY date DESC", get_db_connection())
-    
-    if todo.empty:
-        st.success("🎉 No uncategorized transactions!")
-    else:
-        ed_todo = st.data_editor(
-            todo, 
-            column_config={
-                "category": st.column_config.SelectboxColumn(options=CAT_OPTIONS, required=True),
-                "bucket": st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"], required=True)
-            }, 
-            disabled=["transaction_id", "source", "date", "name", "amount"], 
-            hide_index=True,
-            key="todo_table"
-        )
-        
-        if st.button("💾 Save Action Items"):
+    st.divider(); st.subheader("🚨 Action Items"); todo = pd.read_sql("SELECT * FROM transactions WHERE category='Uncategorized'", get_db_connection())
+    if not todo.empty:
+        ed = st.data_editor(todo, column_config={"category":st.column_config.SelectboxColumn(options=CAT_OPTIONS),"bucket":st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"])}, hide_index=True)
+        if st.button("Save Actions"):
             with get_db_connection().connect() as conn:
-                for i,r in ed_todo.iterrows(): 
-                    if r['category']!='Uncategorized': 
-                        conn.execute(text("UPDATE transactions SET category=:c, bucket=:b WHERE transaction_id=:i"),{"c":r['category'],"b":r['bucket'],"i":r['transaction_id']})
-                        conn.commit()
+                for i,r in ed.iterrows(): 
+                    if r['category']!='Uncategorized': conn.execute(text("UPDATE transactions SET category=:c, bucket=:b WHERE transaction_id=:i"),{"c":r['category'],"b":r['bucket'],"i":r['transaction_id']}); conn.commit()
             st.rerun()
 
-    st.divider()
-
-    # --- 3. SEARCH & EDIT HISTORY (The Fix!) ---
-    st.subheader("🔍 Search & Fix Past Transactions")
-    
-    col_search, col_btn = st.columns([3, 1])
-    with col_search:
-        search_term = st.text_input("Search by Name (Leave empty to see recent)", "")
-    
-    # Build Query
+    st.divider(); st.subheader("🔍 History")
+    search_term = st.text_input("Search:", "")
     query = "SELECT * FROM transactions WHERE category != 'Uncategorized'"
-    params = {}
-    if search_term:
-        query += " AND name ILIKE :s"
-        params['s'] = f"%{search_term}%"
+    if search_term: query += f" AND name ILIKE '%{search_term}%'"
     query += " ORDER BY date DESC LIMIT 50"
-    
-    # Fetch Data
-    with get_db_connection().connect() as conn:
-        history_df = pd.read_sql(text(query), conn, params=params)
-
-    # Editable Table
-    ed_history = st.data_editor(
-        history_df,
-        column_config={
-            "category": st.column_config.SelectboxColumn(options=CAT_OPTIONS, required=True),
-            "bucket": st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"], required=True)
-        },
-        disabled=["transaction_id", "source", "date", "name", "amount"],
-        hide_index=True,
-        key="history_table"
-    )
-
-    if st.button("💾 Update Corrections"):
+    with get_db_connection().connect() as conn: h_df = pd.read_sql(text(query), conn)
+    ed_h = st.data_editor(h_df, column_config={"category":st.column_config.SelectboxColumn(options=CAT_OPTIONS),"bucket":st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"])}, hide_index=True)
+    if st.button("Update History"):
         with get_db_connection().connect() as conn:
-            for i,r in ed_history.iterrows(): 
-                conn.execute(text("UPDATE transactions SET category=:c, bucket=:b WHERE transaction_id=:i"),{"c":r['category'],"b":r['bucket'],"i":r['transaction_id']})
-                conn.commit()
-        st.success("Corrections Saved!")
+            for i,r in ed_h.iterrows(): conn.execute(text("UPDATE transactions SET category=:c, bucket=:b WHERE transaction_id=:i"),{"c":r['category'],"b":r['bucket'],"i":r['transaction_id']}); conn.commit()
         st.rerun()
-# === TAB 4: UPLOAD ===
+
+# === TAB 5: UPLOAD ===
 with tab3:
     st.header("Upload"); bc = st.selectbox("Bank", ["Chase","Citi","Sofi","Chime"]); f = st.file_uploader("CSV/PDF", type=['csv','pdf'])
     if f: 
