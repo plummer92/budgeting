@@ -357,30 +357,95 @@ with tab_month:
                     st.plotly_chart(fig2, use_container_width=True)
 
 
-# === TAB 3: RULES ===
+# === TAB 3: RULES & EDITS ===
 with tab2:
     st.header("⚡ Rules & Edits")
-    CAT_OPTIONS = ["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement", "Pets", "RX", "Savings", "Gambling"]
+    CAT_OPTIONS = ["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement", "Pets", "RX", "Savings"]
     
-    with st.form("add_rule"):
-        c1, c2, c3 = st.columns([2, 1, 1])
-        with c1: nk = st.text_input("Keyword", placeholder="e.g. Walmart")
-        with c2: nc = st.selectbox("Cat", CAT_OPTIONS)
-        with c3: nb = st.selectbox("Bkt", ["SPEND", "BILL", "INCOME", "TRANSFER"])
-        if st.form_submit_button("➕ Add") and nk:
-            with get_db_connection().connect() as conn:
-                conn.execute(text("INSERT INTO category_rules (keyword, category, bucket) VALUES (:k,:c,:b)"), {"k":nk,"c":nc,"b":nb}); conn.commit()
-            run_auto_categorization(); st.rerun()
+    # --- 1. ADD NEW RULE ---
+    with st.expander("➕ Add New Auto-Rule", expanded=True):
+        with st.form("add_rule"):
+            c1, c2, c3 = st.columns([2, 1, 1])
+            with c1: nk = st.text_input("If Name Contains...", placeholder="e.g. Walmart")
+            with c2: nc = st.selectbox("Set Category", CAT_OPTIONS)
+            with c3: nb = st.selectbox("Set Bucket", ["SPEND", "BILL", "INCOME", "TRANSFER"])
             
-    st.subheader("Uncategorized"); todo = pd.read_sql("SELECT * FROM transactions WHERE category='Uncategorized'", get_db_connection())
-    if not todo.empty:
-        ed = st.data_editor(todo, column_config={"category":st.column_config.SelectboxColumn(options=CAT_OPTIONS),"bucket":st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"])}, hide_index=True)
-        if st.button("Save Todo"):
+            if st.form_submit_button("Save Rule") and nk:
+                with get_db_connection().connect() as conn:
+                    conn.execute(text("INSERT INTO category_rules (keyword, category, bucket) VALUES (:k,:c,:b)"), {"k":nk,"c":nc,"b":nb})
+                    conn.commit()
+                run_auto_categorization()
+                st.success(f"Rule saved for '{nk}'!")
+                st.rerun()
+
+    st.divider()
+
+    # --- 2. UNCATEGORIZED ITEMS (Action Items) ---
+    st.subheader("🚨 Action Items (Uncategorized)")
+    todo = pd.read_sql("SELECT * FROM transactions WHERE category='Uncategorized' ORDER BY date DESC", get_db_connection())
+    
+    if todo.empty:
+        st.success("🎉 No uncategorized transactions!")
+    else:
+        ed_todo = st.data_editor(
+            todo, 
+            column_config={
+                "category": st.column_config.SelectboxColumn(options=CAT_OPTIONS, required=True),
+                "bucket": st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"], required=True)
+            }, 
+            disabled=["transaction_id", "source", "date", "name", "amount"], 
+            hide_index=True,
+            key="todo_table"
+        )
+        
+        if st.button("💾 Save Action Items"):
             with get_db_connection().connect() as conn:
-                for i,r in ed.iterrows(): 
-                    if r['category']!='Uncategorized': conn.execute(text("UPDATE transactions SET category=:c, bucket=:b WHERE transaction_id=:i"),{"c":r['category'],"b":r['bucket'],"i":r['transaction_id']}); conn.commit()
+                for i,r in ed_todo.iterrows(): 
+                    if r['category']!='Uncategorized': 
+                        conn.execute(text("UPDATE transactions SET category=:c, bucket=:b WHERE transaction_id=:i"),{"c":r['category'],"b":r['bucket'],"i":r['transaction_id']})
+                        conn.commit()
             st.rerun()
 
+    st.divider()
+
+    # --- 3. SEARCH & EDIT HISTORY (The Fix!) ---
+    st.subheader("🔍 Search & Fix Past Transactions")
+    
+    col_search, col_btn = st.columns([3, 1])
+    with col_search:
+        search_term = st.text_input("Search by Name (Leave empty to see recent)", "")
+    
+    # Build Query
+    query = "SELECT * FROM transactions WHERE category != 'Uncategorized'"
+    params = {}
+    if search_term:
+        query += " AND name ILIKE :s"
+        params['s'] = f"%{search_term}%"
+    query += " ORDER BY date DESC LIMIT 50"
+    
+    # Fetch Data
+    with get_db_connection().connect() as conn:
+        history_df = pd.read_sql(text(query), conn, params=params)
+
+    # Editable Table
+    ed_history = st.data_editor(
+        history_df,
+        column_config={
+            "category": st.column_config.SelectboxColumn(options=CAT_OPTIONS, required=True),
+            "bucket": st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"], required=True)
+        },
+        disabled=["transaction_id", "source", "date", "name", "amount"],
+        hide_index=True,
+        key="history_table"
+    )
+
+    if st.button("💾 Update Corrections"):
+        with get_db_connection().connect() as conn:
+            for i,r in ed_history.iterrows(): 
+                conn.execute(text("UPDATE transactions SET category=:c, bucket=:b WHERE transaction_id=:i"),{"c":r['category'],"b":r['bucket'],"i":r['transaction_id']})
+                conn.commit()
+        st.success("Corrections Saved!")
+        st.rerun()
 # === TAB 4: UPLOAD ===
 with tab3:
     st.header("Upload"); bc = st.selectbox("Bank", ["Chase","Citi","Sofi","Chime"]); f = st.file_uploader("CSV/PDF", type=['csv','pdf'])
