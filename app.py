@@ -360,7 +360,7 @@ with tab_month:
 # === TAB 3: RULES & EDITS ===
 with tab2:
     st.header("⚡ Rules & Edits")
-    CAT_OPTIONS = ["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement", "Pets", "RX", "Savings"]
+    CAT_OPTIONS = ["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement", "Pets", "RX", "Savings", "Gambling", "Personal Loan"]
     
     # --- 1. ADD NEW RULE ---
     with st.expander("➕ Add New Auto-Rule", expanded=True):
