@@ -62,25 +62,51 @@ def run_auto_categorization():
         conn.commit()
     return count
 
+# --- BANK PROCESSORS ---
+def process_chase(df):
+    if 'post date' in df.columns: df = df.rename(columns={'post date': 'date'})
+    elif 'transaction date' in df.columns: df = df.rename(columns={'transaction date': 'date'})
+    if 'description' in df.columns: df = df.rename(columns={'description': 'name'})
+    elif 'merchant' in df.columns: df = df.rename(columns={'merchant': 'name'})
+    df['source'] = 'Chase'
+    return df
+
+def process_citi(df):
+    df = df.rename(columns={'date': 'date', 'description': 'name', 'merchant name': 'name'})
+    if 'debit' not in df.columns: df['debit'] = 0
+    if 'credit' not in df.columns: df['credit'] = 0
+    if 'amount' not in df.columns: df['amount'] = df['credit'].fillna(0) - df['debit'].fillna(0)
+    df['source'] = 'Citi'
+    return df
+
+def process_sofi(df):
+    # Sofi usually has 'Date', 'Description', 'Amount'
+    # Check for 'Payment Date' vs 'Posted Date'
+    if 'payment date' in df.columns: df = df.rename(columns={'payment date': 'date'})
+    elif 'posted date' in df.columns: df = df.rename(columns={'posted date': 'date'})
+    
+    df = df.rename(columns={'description': 'name'})
+    df['source'] = 'Sofi'
+    return df
+
+def process_chime(df):
+    # Chime usually has 'Transaction Date', 'Description', 'Amount'
+    df = df.rename(columns={'transaction date': 'date', 'description': 'name'})
+    df['source'] = 'Chime'
+    return df
+
 def clean_bank_csv(uploaded_file, bank_choice):
     try:
         df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
         df.columns = df.columns.str.strip().str.lower().str.replace('\ufeff', '')
         
-        if bank_choice == "Chase":
-            if 'post date' in df.columns: df = df.rename(columns={'post date': 'date'})
-            elif 'transaction date' in df.columns: df = df.rename(columns={'transaction date': 'date'})
-            if 'description' in df.columns: df = df.rename(columns={'description': 'name'})
-            elif 'merchant' in df.columns: df = df.rename(columns={'merchant': 'name'})
-            df['source'] = 'Chase'
-            
-        elif bank_choice == "Citi":
-            df = df.rename(columns={'date': 'date', 'description': 'name', 'merchant name': 'name'})
-            if 'debit' not in df.columns: df['debit'] = 0
-            if 'credit' not in df.columns: df['credit'] = 0
-            if 'amount' not in df.columns: df['amount'] = df['credit'].fillna(0) - df['debit'].fillna(0)
-            df['source'] = 'Citi'
+        # ROUTING LOGIC
+        if bank_choice == "Chase": df = process_chase(df)
+        elif bank_choice == "Citi": df = process_citi(df)
+        elif bank_choice == "Sofi": df = process_sofi(df)
+        elif bank_choice == "Chime": df = process_chime(df)
 
+        # CLEANUP
         if df['amount'].dtype == 'object':
             df['amount'] = df['amount'].astype(str).str.replace('$', '').str.replace(',', '')
             df['amount'] = pd.to_numeric(df['amount'])
@@ -99,7 +125,7 @@ def clean_bank_csv(uploaded_file, bank_choice):
             if c not in df.columns: df[c] = None
         return df[req].dropna(subset=['date'])
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error reading CSV: {e}")
         st.stop()
 
 def save_to_neon(df):
@@ -126,67 +152,100 @@ def save_to_neon(df):
 init_db()
 tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "⚡ Rules & Edits", "📂 Upload Data"])
 
-# === TAB 1: DASHBOARD ===
+# === TAB 1: DASHBOARD (Now with Time Travel!) ===
 with tab1:
-    today = datetime.now()
-    start_of_week = today - timedelta(days=today.weekday())
+    col_date, col_title = st.columns([1, 3])
+    with col_date:
+        # 📅 THE TIME MACHINE
+        view_date = st.date_input("📅 View Week Containing:", value=datetime.now())
+        
+    # Calculate Monday-Sunday for the SELECTED date
+    # weekday() -> Mon=0, Sun=6
+    start_of_week = view_date - timedelta(days=view_date.weekday())
     end_of_week = start_of_week + timedelta(days=6)
     
-    date_label = f"{start_of_week.strftime('%b %d')} - {end_of_week.strftime('%b %d')}"
-    st.header(f"Weekly Envelope Status ({date_label})")
+    # Convert to datetime for sql comparison
+    start_dt = pd.to_datetime(start_of_week)
+    end_dt = pd.to_datetime(end_of_week)
+
+    with col_title:
+        date_label = f"{start_of_week.strftime('%b %d')} - {end_of_week.strftime('%b %d')}"
+        st.title(f"Weekly Status: {date_label}")
     
-    current_month = datetime.now().strftime('%Y-%m')
+    # Load ALL data to perform filtering in Pandas (Easier for date math)
+    # Efficiency Note: Ideally we filter in SQL, but for personal budget size, this is fast enough and safer
     with get_db_connection().connect() as conn:
-        query = text("SELECT * FROM transactions WHERE date::text LIKE :month")
-        df = pd.read_sql(query, conn, params={"month": f"{current_month}%"})
-    
+        df = pd.read_sql("SELECT * FROM transactions", conn)
+        
     if df.empty:
-        st.info("No data for this month.")
+        st.info("No data found. Go to Tab 3 to upload.")
     else:
-        week_spend = df[
-            (pd.to_datetime(df['date']) >= start_of_week) & 
-            (pd.to_datetime(df['date']) <= end_of_week) &
-            (df['bucket'] == 'SPEND')
+        # Convert DB dates to datetime
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # Filter for Selected Week
+        week_df = df[
+            (df['date'] >= pd.Timestamp(start_of_week)) & 
+            (df['date'] <= pd.Timestamp(end_of_week))
+        ].copy()
+        
+        # Spending Logic (Ignore TRANSFERS)
+        week_spend = week_df[
+            (week_df['bucket'] == 'SPEND')
         ]['amount'].sum()
         
+        # Hardcoded Budget
         weekly_allowance = (4000 - 1500) / 4 
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Weekly Allowance", f"${weekly_allowance:,.0f}")
         col2.metric("Spent This Week", f"${abs(week_spend):,.2f}")
         col3.metric("Remaining", f"${(weekly_allowance - abs(week_spend)):,.2f}")
-        st.progress(min(abs(week_spend) / weekly_allowance, 1.0) if weekly_allowance > 0 else 0)
+        
+        # Progress Bar
+        bar_val = min(abs(week_spend) / weekly_allowance, 1.0) if weekly_allowance > 0 else 0
+        st.progress(bar_val)
+        
+        st.divider()
         
         c1, c2 = st.columns(2)
         with c1:
-            spend_df = df[(df['amount'] < 0) & (df['bucket'] == 'SPEND')].copy()
-            if not spend_df.empty:
-                spend_df['amount'] = spend_df['amount'].abs()
-                st.plotly_chart(px.pie(spend_df, values='amount', names='category', hole=0.4), use_container_width=True)
+            st.subheader("Spending Breakdown")
+            spend_breakdown = week_df[(week_df['amount'] < 0) & (week_df['bucket'] == 'SPEND')].copy()
+            if not spend_breakdown.empty:
+                spend_breakdown['amount'] = spend_breakdown['amount'].abs()
+                st.plotly_chart(px.pie(spend_breakdown, values='amount', names='category', hole=0.4), use_container_width=True)
+            else:
+                st.info("No spending recorded this week.")
+                
         with c2:
-            st.dataframe(df[['date', 'name', 'amount', 'category']].sort_values('date', ascending=False).head(10), hide_index=True)
+            st.subheader("Transaction Log")
+            st.dataframe(
+                week_df[['date', 'name', 'amount', 'category', 'bucket']].sort_values('date', ascending=False), 
+                hide_index=True,
+                use_container_width=True
+            )
 
 # === TAB 2: RULES & EDITS ===
 with tab2:
     st.header("⚡ Auto-Categorization Rules")
     
-    # DEFINE CATEGORY LIST
     CAT_OPTIONS = [
         "Groceries", "Dining Out", "Rent", "Utilities", "Shopping", 
         "Transport", "Income", "Subscriptions", "Credit Card Pay",
-        "Home Improvement", "Pets", "RX"  # <--- NEW CATEGORIES ADDED
+        "Home Improvement", "Pets", "RX"
     ]
     
     with st.form("add_rule_form"):
         c1, c2, c3 = st.columns([2, 1, 1])
         with c1: 
-            st.caption("Type a keyword (e.g. 'Amazon' or 'Shell')")
-            new_keyword = st.text_input("If Name Contains...", placeholder="e.g. Amazon")
+            st.caption("Keyword (e.g. 'Chewy')")
+            new_keyword = st.text_input("If Name Contains...", placeholder="e.g. Chewy")
         with c2: 
-            st.caption("Choose Category")
-            new_cat = st.selectbox("Category", options=CAT_OPTIONS)
+            st.caption("Category")
+            new_cat = st.selectbox("Category", options=CAT_OPTIONS, index=10) # Defaults to Pets for ease
         with c3: 
-            st.caption("Choose Bucket")
+            st.caption("Bucket")
             new_bucket = st.selectbox("Bucket", options=["SPEND", "BILL", "INCOME", "TRANSFER"])
             
         if st.form_submit_button("➕ Add Rule") and new_keyword:
@@ -204,9 +263,9 @@ with tab2:
     todo_df = pd.read_sql("SELECT * FROM transactions WHERE category = 'Uncategorized' ORDER BY date DESC", get_db_connection())
     
     if todo_df.empty:
-        st.success("🎉 All transactions categorized!")
+        st.success("🎉 All clear!")
     else:
-        st.caption(f"You have {len(todo_df)} transactions to sort.")
+        st.caption(f"{len(todo_df)} transactions need sorting.")
         edited_todo = st.data_editor(
             todo_df,
             column_config={
@@ -218,7 +277,7 @@ with tab2:
             key="todo_editor"
         )
         
-        if st.button("💾 Save & Clear Sorted Items"):
+        if st.button("💾 Save Changes"):
             with get_db_connection().connect() as conn:
                 for index, row in edited_todo.iterrows():
                     if row['category'] != 'Uncategorized':
@@ -226,13 +285,12 @@ with tab2:
                             UPDATE transactions SET category = :cat, bucket = :bucket WHERE transaction_id = :tid
                         """), {"cat": row['category'], "bucket": row['bucket'], "tid": row['transaction_id']})
                         conn.commit()
-            st.success("Saved!")
             st.rerun()
 
     st.divider()
 
-    with st.expander("✅ Categorized History"):
-        done_df = pd.read_sql("SELECT * FROM transactions WHERE category != 'Uncategorized' ORDER BY date DESC LIMIT 50", get_db_connection())
+    with st.expander("✅ History (Click to Edit)"):
+        done_df = pd.read_sql("SELECT * FROM transactions WHERE category != 'Uncategorized' ORDER BY date DESC LIMIT 100", get_db_connection())
         
         edited_done = st.data_editor(
             done_df,
@@ -257,9 +315,11 @@ with tab2:
 
 # === TAB 3: UPLOAD & SETTINGS ===
 with tab3:
-    st.header("Upload New Data")
-    bank_choice = st.selectbox("Select Bank", ["Chase", "Citi"])
+    st.header("Upload Data")
+    # UPDATED DROPDOWN
+    bank_choice = st.selectbox("Select Bank", ["Chase", "Citi", "Sofi", "Chime"])
     uploaded_file = st.file_uploader("Upload CSV", type=['csv'])
+    
     if uploaded_file:
         clean_df = clean_bank_csv(uploaded_file, bank_choice)
         st.dataframe(clean_df.head(), hide_index=True)
@@ -273,7 +333,7 @@ with tab3:
     st.subheader("⚠️ Prune Old Data")
     col_a, col_b = st.columns([2, 1])
     with col_a:
-        cutoff_date = st.date_input("Delete all transactions BEFORE:", value=pd.to_datetime("2025-10-01"))
+        cutoff_date = st.date_input("Delete BEFORE:", value=pd.to_datetime("2025-10-01"))
     with col_b:
         st.write("") 
         st.write("") 
@@ -285,5 +345,5 @@ with tab3:
                 )
                 conn.commit()
                 deleted_rows = result.rowcount
-            st.success(f"Cleaned up! Deleted {deleted_rows} old transactions.")
+            st.success(f"Deleted {deleted_rows} rows.")
             st.rerun()
