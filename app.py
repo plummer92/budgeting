@@ -360,7 +360,7 @@ with tab_month:
 # === TAB 3: RULES ===
 with tab2:
     st.header("⚡ Rules & Edits")
-    CAT_OPTIONS = ["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement", "Pets", "RX", "Savings"]
+    CAT_OPTIONS = ["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement", "Pets", "RX", "Savings", "Gambling"]
     
     with st.form("add_rule"):
         c1, c2, c3 = st.columns([2, 1, 1])
