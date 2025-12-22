@@ -334,12 +334,13 @@ with tab_month:
             if not outflows.empty:
                 st.plotly_chart(px.bar(outflows, x='category', y='amount', color='bucket'), use_container_width=True)
 
-# === TAB 4: RULES ===
+# === TAB 4: RULES & HISTORY ===
 with tab2:
     st.header("⚡ Rules & Edits")
     CAT_OPTIONS = ["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement", "Pets", "RX", "Savings", "Gambling", "Personal Loan"]
     
-    with st.expander("➕ Add New Auto-Rule", expanded=True):
+    # --- 1. ADD RULES ---
+    with st.expander("➕ Add New Auto-Rule", expanded=False):
         with st.form("add_rule"):
             c1, c2, c3 = st.columns([2, 1, 1])
             with c1: nk = st.text_input("Name Contains...", placeholder="e.g. Walmart")
@@ -350,6 +351,7 @@ with tab2:
                     conn.execute(text("INSERT INTO category_rules (keyword, category, bucket) VALUES (:k,:c,:b)"), {"k":nk,"c":nc,"b":nb}); conn.commit()
                 run_auto_categorization(); st.rerun()
 
+    # --- 2. ACTION ITEMS ---
     st.divider(); st.subheader("🚨 Action Items"); todo = pd.read_sql("SELECT * FROM transactions WHERE category='Uncategorized'", get_db_connection())
     if not todo.empty:
         ed = st.data_editor(todo, column_config={"category":st.column_config.SelectboxColumn(options=CAT_OPTIONS),"bucket":st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"])}, hide_index=True)
@@ -359,18 +361,34 @@ with tab2:
                     if r['category']!='Uncategorized': conn.execute(text("UPDATE transactions SET category=:c, bucket=:b WHERE transaction_id=:i"),{"c":r['category'],"b":r['bucket'],"i":r['transaction_id']}); conn.commit()
             st.rerun()
 
-    st.divider(); st.subheader("🔍 History")
-    search_term = st.text_input("Search:", "")
+    # --- 3. FULL HISTORY (UNLOCKED) ---
+    st.divider(); st.subheader("🔍 Full History (Search to see ALL)")
+    
+    # Search Bar
+    search_term = st.text_input("Search by Name or Amount:", "")
+    
+    # LOGIC: If searching, SHOW EVERYTHING. If not, show last 50.
     query = "SELECT * FROM transactions WHERE category != 'Uncategorized'"
-    if search_term: query += f" AND name ILIKE '%{search_term}%'"
-    query += " ORDER BY date DESC LIMIT 50"
+    if search_term: 
+        query += f" AND (name ILIKE '%{search_term}%' OR amount::text LIKE '%{search_term}%')"
+        query += " ORDER BY date DESC" # <--- LIMIT REMOVED HERE
+    else:
+        query += " ORDER BY date DESC LIMIT 50"
+        
     with get_db_connection().connect() as conn: h_df = pd.read_sql(text(query), conn)
-    ed_h = st.data_editor(h_df, column_config={"category":st.column_config.SelectboxColumn(options=CAT_OPTIONS),"bucket":st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"])}, hide_index=True)
+    
+    st.caption(f"Showing {len(h_df)} transactions.")
+    
+    # Editable Table
+    ed_h = st.data_editor(h_df, column_config={
+        "category":st.column_config.SelectboxColumn(options=CAT_OPTIONS),
+        "bucket":st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"])
+    }, hide_index=True)
+    
     if st.button("Update History"):
         with get_db_connection().connect() as conn:
             for i,r in ed_h.iterrows(): conn.execute(text("UPDATE transactions SET category=:c, bucket=:b WHERE transaction_id=:i"),{"c":r['category'],"b":r['bucket'],"i":r['transaction_id']}); conn.commit()
-        st.rerun()
-
+        st.success("Updated!"); st.rerun()
 # === TAB 5: UPLOAD ===
 with tab3:
     st.header("Upload"); bc = st.selectbox("Bank", ["Chase","Citi","Sofi","Chime"]); f = st.file_uploader("CSV/PDF", type=['csv','pdf'])
