@@ -187,7 +187,7 @@ def save_to_neon(df):
 init_db()
 tab1, tab_insights, tab_month, tab2, tab3 = st.tabs(["📊 Dashboard", "💡 Insights (New!)", "📅 Monthly", "⚡ Rules", "📂 Upload"])
 
-# === TAB 1: WEEKLY DASHBOARD ===
+# === TAB 1: WEEKLY DASHBOARD (With "The Nuke" Button) ===
 with tab1:
     col_date, col_set = st.columns([2, 1])
     with col_date:
@@ -197,13 +197,22 @@ with tab1:
         st.caption(f"Showing: {start_of_week.strftime('%b %d')} - {end_of_week.strftime('%b %d')}")
 
     with col_set:
-        with st.expander("⚙️ Budget Settings"):
+        with st.expander("⚙️ Settings & Danger Zone"):
             est_income = get_budget_setting("est_income", 4000.0)
             est_bills = get_budget_setting("est_bills", 1500.0)
             new_income = st.number_input("Income", value=est_income)
             new_bills = st.number_input("Fixed Bills", value=est_bills)
-            if st.button("Save"):
+            if st.button("Save Settings"):
                 set_budget_setting("est_income", new_income); set_budget_setting("est_bills", new_bills); st.rerun()
+            
+            st.divider()
+            st.markdown("### 🗑️ Nuclear Option")
+            if st.button("Delete THIS WEEK'S Data"):
+                with get_db_connection().connect() as conn:
+                    conn.execute(text("DELETE FROM transactions WHERE date >= :s AND date <= :e"), {"s":start_of_week, "e":end_of_week})
+                    conn.commit()
+                st.error(f"Deleted data from {start_of_week} to {end_of_week}. Please re-upload.")
+                st.rerun()
 
     with get_db_connection().connect() as conn:
         df = pd.read_sql("SELECT * FROM transactions", conn)
@@ -213,7 +222,10 @@ with tab1:
     else:
         df['date'] = pd.to_datetime(df['date'])
         week_df = df[(df['date'] >= pd.Timestamp(start_of_week)) & (df['date'] <= pd.Timestamp(end_of_week))].copy()
-        week_spend = week_df[(week_df['bucket'] == 'SPEND')]['amount'].sum()
+        
+        # FILTER: Only sum items where Bucket is 'SPEND'
+        spend_only_df = week_df[week_df['bucket'] == 'SPEND']
+        week_spend = spend_only_df['amount'].sum()
         
         discretionary_pool = new_income - new_bills
         weekly_allowance = discretionary_pool / 4
@@ -228,13 +240,17 @@ with tab1:
         st.divider()
         c1, c2 = st.columns(2)
         with c1:
-            spend_df = week_df[(week_df['amount'] < 0) & (week_df['bucket'] == 'SPEND')].copy()
-            if not spend_df.empty:
-                spend_df['amount'] = spend_df['amount'].abs()
-                st.plotly_chart(px.pie(spend_df, values='amount', names='category', hole=0.4), use_container_width=True)
+            st.subheader("🕵️ Spending Detective")
+            st.caption("These are the EXACT rows lowering your score.")
+            if not spend_only_df.empty:
+                # SHOW THE BUCKET COLUMN SO WE CAN SEE ERRORS
+                st.dataframe(spend_only_df[['date', 'name', 'amount', 'bucket']].sort_values('amount'), hide_index=True, use_container_width=True)
+            else:
+                st.success("No spending recorded this week!")
+                
         with c2:
-            st.dataframe(week_df[['date', 'name', 'amount', 'category']].sort_values('date', ascending=False), hide_index=True, use_container_width=True)
-
+            st.subheader("All Transactions")
+            st.dataframe(week_df[['date', 'name', 'amount', 'bucket']].sort_values('date', ascending=False), hide_index=True, use_container_width=True)
 # === TAB 2: INSIGHTS (THE "WHAT IF" MACHINE) ===
 with tab_insights:
     st.header("💡 Spending Insights")
