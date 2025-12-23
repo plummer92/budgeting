@@ -369,31 +369,89 @@ with tab_insights:
             st.caption("These 5 places took the most money this week.")
 
 # === TAB 3: MONTHLY ===
+# === TAB 3: MONTHLY OVERVIEW (Interactive) ===
 with tab_month:
     st.header("📅 Monthly Overview")
-    sel_date = st.date_input("Select Month:", value=datetime.now(), key="month_picker")
+    
+    col_sel, col_empty = st.columns([1, 3])
+    with col_sel:
+        sel_date = st.date_input("Select Month:", value=datetime.now(), key="month_picker")
+    
+    # Calculate Month Start/End
     start_month = sel_date.replace(day=1)
     next_month = (start_month.replace(day=28) + timedelta(days=4)).replace(day=1)
     end_month = next_month - timedelta(days=1)
     
+    st.caption(f"Analyzing: {start_month.strftime('%b 1')} - {end_month.strftime('%b %d, %Y')}")
+    
     if not df.empty:
+        # Filter Data for Month
         month_df = df[(df['date'] >= pd.Timestamp(start_month)) & (df['date'] <= pd.Timestamp(end_month))].copy()
-        if not month_df.empty:
-            ti = month_df[(month_df['amount'] > 0) & (month_df['bucket'] == 'INCOME')]['amount'].sum()
-            tb = month_df[(month_df['amount'] < 0) & (month_df['bucket'] == 'BILL')]['amount'].sum()
-            ts = month_df[(month_df['amount'] < 0) & (month_df['bucket'] == 'SPEND')]['amount'].sum()
-            net = ti + tb + ts
+        
+        if month_df.empty:
+            st.info("No transactions found for this month.")
+        else:
+            # 1. HIGH LEVEL METRICS
+            # Income = Positive amounts in INCOME bucket
+            inc_df = month_df[(month_df['bucket'] == 'INCOME') & (month_df['amount'] > 0)]
+            total_income = inc_df['amount'].sum()
+            
+            # Bills = Negative amounts in BILL bucket
+            bill_df = month_df[(month_df['bucket'] == 'BILL') & (month_df['amount'] < 0)]
+            total_bills = bill_df['amount'].sum()
+            
+            # Spend = Negative amounts in SPEND bucket
+            spend_df = month_df[(month_df['bucket'] == 'SPEND') & (month_df['amount'] < 0)]
+            total_spend = spend_df['amount'].sum()
+            
+            net_saved = total_income + total_bills + total_spend
             
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Income", f"${ti:,.0f}")
-            m2.metric("Bills", f"${abs(tb):,.0f}")
-            m3.metric("Spending", f"${abs(ts):,.0f}")
-            m4.metric("Net Saved", f"${net:,.2f}", delta_color="normal" if net > 0 else "inverse")
+            m1.metric("💰 Income", f"${total_income:,.0f}")
+            m2.metric("🧾 Fixed Bills", f"${abs(total_bills):,.0f}")
+            m3.metric("💸 Spending", f"${abs(total_spend):,.0f}")
+            m4.metric("🏦 Net Saved", f"${net_saved:,.2f}", delta_color="normal" if net_saved > 0 else "inverse")
             
-            outflows = month_df[month_df['amount'] < 0].copy()
-            outflows['amount'] = outflows['amount'].abs()
-            if not outflows.empty:
-                st.plotly_chart(px.bar(outflows, x='category', y='amount', color='bucket'), use_container_width=True)
+            st.divider()
+            
+            # 2. INTERACTIVE DRILL-DOWN
+            st.subheader("🔍 Deep Dive")
+            view_mode = st.radio("Show details for:", ["Discretionary Spending", "Fixed Bills", "Income"], horizontal=True)
+            
+            target_df = pd.DataFrame()
+            if view_mode == "Discretionary Spending":
+                target_df = spend_df.copy()
+            elif view_mode == "Fixed Bills":
+                target_df = bill_df.copy()
+            elif view_mode == "Income":
+                target_df = inc_df.copy()
+            
+            if not target_df.empty:
+                # Make amount positive for viewing
+                target_df['amount'] = target_df['amount'].abs()
+                
+                c1, c2 = st.columns([1, 2])
+                
+                with c1:
+                    st.markdown(f"**Breakdown by Category**")
+                    cat_summary = target_df.groupby('category')['amount'].sum().sort_values(ascending=False)
+                    st.dataframe(cat_summary, use_container_width=True)
+                    
+                    # Mini Pie Chart
+                    fig = px.pie(target_df, values='amount', names='category', hole=0.4)
+                    fig.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=250)
+                    st.plotly_chart(fig, use_container_width=True)
+
+                with c2:
+                    st.markdown(f"**Transaction Log ({len(target_df)})**")
+                    st.dataframe(
+                        target_df[['date', 'name', 'category', 'amount']].sort_values('date', ascending=False),
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={"amount": st.column_config.NumberColumn(format="$%.2f")}
+                    )
+            else:
+                st.info(f"No {view_mode} found for this month.")
 
 # === TAB 4: RULES & HISTORY ===
 with tab2:
