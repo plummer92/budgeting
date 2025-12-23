@@ -25,10 +25,11 @@ def get_db_connection():
         st.stop()
     return create_engine(db_url.replace("postgres://", "postgresql://"))
 
-# --- DB INIT ---
+# --- DB INIT (AUTO-FIXING) ---
 def init_db():
     engine = get_db_connection()
     with engine.connect() as conn:
+        # 1. Transactions Table
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS transactions (
                 transaction_id TEXT PRIMARY KEY, date DATE, name TEXT, merchant_name TEXT, 
@@ -36,6 +37,7 @@ def init_db():
                 manual_category TEXT, manual_bucket TEXT, source TEXT
             );
         """))
+        # 2. Rules Table
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS category_rules (
                 rule_id SERIAL PRIMARY KEY,
@@ -44,14 +46,20 @@ def init_db():
                 bucket TEXT NOT NULL
             );
         """))
+        # 3. Settings Table
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS budget_settings (
                 key_name TEXT PRIMARY KEY,
-                value NUMERIC,
-                str_value TEXT
+                value NUMERIC
             );
         """))
-        # NEW: Net Worth Accounts Table
+        # 4. DATABASE PATCH: Add str_value if missing
+        try:
+            conn.execute(text("ALTER TABLE budget_settings ADD COLUMN IF NOT EXISTS str_value TEXT"))
+        except Exception:
+            pass # Ignore if it already exists or fails harmlessly
+
+        # 5. Net Worth Table
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS net_worth_accounts (
                 account_id SERIAL PRIMARY KEY,
@@ -65,14 +73,21 @@ def init_db():
 # --- HELPERS ---
 def get_budget_setting(key, default_val):
     with get_db_connection().connect() as conn:
-        result = conn.execute(text("SELECT value FROM budget_settings WHERE key_name = :k"), {"k": key}).fetchone()
-        if result and result[0] is not None: return float(result[0])
+        # Check if table has the column first to be safe, but init_db should handle it
+        try:
+            result = conn.execute(text("SELECT value FROM budget_settings WHERE key_name = :k"), {"k": key}).fetchone()
+            if result and result[0] is not None: return float(result[0])
+        except:
+            pass
         return float(default_val)
 
 def get_str_setting(key, default_val):
     with get_db_connection().connect() as conn:
-        result = conn.execute(text("SELECT str_value FROM budget_settings WHERE key_name = :k"), {"k": key}).fetchone()
-        if result and result[0] is not None: return str(result[0])
+        try:
+            result = conn.execute(text("SELECT str_value FROM budget_settings WHERE key_name = :k"), {"k": key}).fetchone()
+            if result and result[0] is not None: return str(result[0])
+        except:
+            pass
         return str(default_val)
 
 def set_budget_setting(key, val, is_str=False):
@@ -277,7 +292,6 @@ with tab_life:
     st.header("📈 The Life Balance")
     st.caption("Are you winning or losing over time?")
     
-    # Settings for Start Date
     saved_start = get_str_setting("budget_start_date", "2025-01-01")
     c_set, c_chart = st.columns([1, 3])
     
@@ -289,30 +303,24 @@ with tab_life:
             
     with c_chart:
         if not df.empty:
-            # Logic: Calculate Cumulative Allowance vs Cumulative Spend
             mask = df['date'] >= pd.Timestamp(start_date_input)
             life_df = df[mask].copy()
             
-            # 1. Get Weekly Allowance
             wk_allow = (est_income - est_bills) / 4
             daily_allow = wk_allow / 7
             
-            # 2. Generate Daily Range
             date_range = pd.date_range(start=start_date_input, end=datetime.now())
             daily_data = pd.DataFrame(index=date_range)
             daily_data['allowance'] = daily_allow
             
-            # 3. Merge Spending
             daily_spend = life_df[life_df['bucket'] == 'SPEND'].groupby('date')['amount'].sum().abs()
             daily_data = daily_data.join(daily_spend).fillna(0)
             daily_data = daily_data.rename(columns={'amount': 'spend'})
             
-            # 4. Running Totals
             daily_data['cum_allowance'] = daily_data['allowance'].cumsum()
             daily_data['cum_spend'] = daily_data['spend'].cumsum()
             daily_data['running_balance'] = daily_data['cum_allowance'] - daily_data['cum_spend']
             
-            # 5. Chart
             last_bal = daily_data['running_balance'].iloc[-1]
             st.metric("Total Life Balance", f"${last_bal:,.2f}", delta="Surplus" if last_bal > 0 else "Deficit")
             
@@ -324,13 +332,11 @@ with tab_life:
 with tab_net:
     st.header("🏦 Net Worth & Loans")
     
-    # 1. ACCOUNTS TABLE
     with st.expander("📝 Update Account Balances", expanded=True):
         with get_db_connection().connect() as conn:
             accounts_df = pd.read_sql("SELECT * FROM net_worth_accounts ORDER BY type", conn)
         
         if accounts_df.empty:
-            # Default Data
             default_data = pd.DataFrame([
                 {"name": "Chime Checking", "type": "Asset", "balance": 1500.00},
                 {"name": "Chime Savings", "type": "Asset", "balance": 5000.00},
@@ -343,7 +349,6 @@ with tab_net:
                 conn.commit()
             st.rerun()
 
-        # Editable Table
         edited_acc = st.data_editor(accounts_df, column_config={
             "account_id": None,
             "type": st.column_config.SelectboxColumn(options=["Asset", "Liability"]),
@@ -352,7 +357,7 @@ with tab_net:
         
         if st.button("💾 Save Balances"):
             with get_db_connection().connect() as conn:
-                conn.execute(text("DELETE FROM net_worth_accounts")) # Simple wipe and replace
+                conn.execute(text("DELETE FROM net_worth_accounts"))
                 for _, row in edited_acc.iterrows():
                     conn.execute(text("INSERT INTO net_worth_accounts (name, type, balance) VALUES (:n, :t, :b)"), 
                                  {"n": row['name'], "t": row['type'], "b": row['balance']})
@@ -360,7 +365,6 @@ with tab_net:
             st.success("Balances Saved!")
             st.rerun()
 
-    # 2. METRICS
     assets = edited_acc[edited_acc['type'] == 'Asset']['balance'].sum()
     liabilities = edited_acc[edited_acc['type'] == 'Liability']['balance'].sum()
     net_worth = assets - liabilities
@@ -370,11 +374,7 @@ with tab_net:
     m2.metric("Total Debt", f"${liabilities:,.2f}")
     m3.metric("Net Worth", f"${net_worth:,.2f}", delta_color="normal" if net_worth > 0 else "inverse")
     
-    # 3. CHART
-    chart_data = pd.DataFrame({
-        "Type": ["Assets", "Liabilities"],
-        "Amount": [assets, liabilities]
-    })
+    chart_data = pd.DataFrame({"Type": ["Assets", "Liabilities"], "Amount": [assets, liabilities]})
     st.plotly_chart(px.bar(chart_data, x="Type", y="Amount", color="Type", title="Assets vs Liabilities"), use_container_width=True)
 
 # === TAB 4: INSIGHTS ===
