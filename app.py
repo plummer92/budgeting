@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from datetime import datetime, timedelta
 import plotly.express as px
+import plotly.graph_objects as go
 import pdfplumber
 
 load_dotenv()
@@ -46,7 +47,17 @@ def init_db():
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS budget_settings (
                 key_name TEXT PRIMARY KEY,
-                value NUMERIC
+                value NUMERIC,
+                str_value TEXT
+            );
+        """))
+        # NEW: Net Worth Accounts Table
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS net_worth_accounts (
+                account_id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL, -- 'Asset' or 'Liability'
+                balance NUMERIC NOT NULL
             );
         """))
         conn.commit()
@@ -55,15 +66,21 @@ def init_db():
 def get_budget_setting(key, default_val):
     with get_db_connection().connect() as conn:
         result = conn.execute(text("SELECT value FROM budget_settings WHERE key_name = :k"), {"k": key}).fetchone()
-        if result: return float(result[0])
+        if result and result[0] is not None: return float(result[0])
         return float(default_val)
 
-def set_budget_setting(key, value):
+def get_str_setting(key, default_val):
     with get_db_connection().connect() as conn:
-        conn.execute(text("""
-            INSERT INTO budget_settings (key_name, value) VALUES (:k, :v)
-            ON CONFLICT (key_name) DO UPDATE SET value = :v
-        """), {"k": key, "v": value})
+        result = conn.execute(text("SELECT str_value FROM budget_settings WHERE key_name = :k"), {"k": key}).fetchone()
+        if result and result[0] is not None: return str(result[0])
+        return str(default_val)
+
+def set_budget_setting(key, val, is_str=False):
+    with get_db_connection().connect() as conn:
+        if is_str:
+            conn.execute(text("INSERT INTO budget_settings (key_name, str_value) VALUES (:k, :v) ON CONFLICT (key_name) DO UPDATE SET str_value = :v"), {"k": key, "v": val})
+        else:
+            conn.execute(text("INSERT INTO budget_settings (key_name, value) VALUES (:k, :v) ON CONFLICT (key_name) DO UPDATE SET value = :v"), {"k": key, "v": val})
         conn.commit()
 
 def run_auto_categorization():
@@ -83,9 +100,6 @@ def run_auto_categorization():
 
 # --- FILE PROCESSORS ---
 def process_chime_pdf(uploaded_file):
-    """
-    Text-Mode Parser for Chime PDFs (Handles borderless tables)
-    """
     transactions = []
     filename = uploaded_file.name
     year_match = re.search(r'20\d{2}', filename)
@@ -98,14 +112,12 @@ def process_chime_pdf(uploaded_file):
                 if text:
                     lines = text.split('\n')
                     for line in lines:
-                        # Regex for Date (MM/DD/YYYY or Mon DD)
                         match = re.match(r'^(\d{1,2}/\d{1,2}/\d{2,4}|[A-Z][a-z]{2}\s\d{1,2})\s+(.*)', line)
                         if match:
                             date_part = match.group(1)
                             rest_of_line = match.group(2)
                             if '/' not in date_part: date_part = f"{date_part}, {default_year}"
                             
-                            # Scan backwards for amount
                             tokens = rest_of_line.split()
                             amount = 0.0
                             description_parts = []
@@ -113,7 +125,6 @@ def process_chime_pdf(uploaded_file):
                             
                             for i in range(len(tokens) - 1, -1, -1):
                                 clean_token = tokens[i].replace('$', '').replace(',', '').replace('(', '-').replace(')', '')
-                                # Check if token is a valid number
                                 if re.match(r'^-?\d+\.\d{2}$', clean_token) and not found_amount:
                                     amount = float(clean_token)
                                     found_amount = True
@@ -121,22 +132,14 @@ def process_chime_pdf(uploaded_file):
                                     break
                             
                             if found_amount:
-                                transactions.append({
-                                    'date': date_part, 
-                                    'name': " ".join(description_parts), 
-                                    'amount': amount, 
-                                    'source': 'Chime PDF'
-                                })
-    except Exception as e: st.warning(f"PDF Parsing Warning: {e}")
-    
+                                transactions.append({'date': date_part, 'name': " ".join(description_parts), 'amount': amount, 'source': 'Chime PDF'})
+    except Exception as e: st.warning(f"PDF Error: {e}")
     if not transactions: return pd.DataFrame(columns=['date', 'name', 'amount', 'source'])
     return pd.DataFrame(transactions)
 
 def clean_bank_file(uploaded_file, bank_choice):
     try:
-        # Lowercase check for file extension
         filename = uploaded_file.name.lower()
-        
         if filename.endswith('.csv'):
             df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
             df.columns = df.columns.str.strip().str.lower().str.replace('\ufeff', '')
@@ -145,19 +148,17 @@ def clean_bank_file(uploaded_file, bank_choice):
                 if 'post date' in df.columns: df = df.rename(columns={'post date': 'date'})
                 elif 'transaction date' in df.columns: df = df.rename(columns={'transaction date': 'date'})
                 if 'description' in df.columns: df = df.rename(columns={'description': 'name'})
-            
             elif bank_choice == "Citi":
                 df = df.rename(columns={'date': 'date', 'description': 'name'})
                 if 'debit' not in df.columns: df['debit'] = 0
                 if 'credit' not in df.columns: df['credit'] = 0
                 if 'amount' not in df.columns: df['amount'] = df['credit'].fillna(0) - df['debit'].fillna(0)
-            
             elif bank_choice == "Sofi":
                 if 'payment date' in df.columns: df = df.rename(columns={'payment date': 'date'})
                 df = df.rename(columns={'description': 'name'})
-            
-            elif bank_choice == "Chime":
-                df = df.rename(columns={'transaction date': 'date', 'description': 'name'})
+            elif bank_choice == "Chime" or bank_choice == "Loan/Other":
+                if 'transaction date' in df.columns: df = df.rename(columns={'transaction date': 'date'})
+                if 'description' in df.columns: df = df.rename(columns={'description': 'name'})
             
             df['source'] = bank_choice
             
@@ -173,10 +174,7 @@ def clean_bank_file(uploaded_file, bank_choice):
             df['amount'] = pd.to_numeric(df['amount'])
             
         df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
-        
-        # Generate Unique ID
         df['transaction_id'] = df.apply(lambda row: hashlib.md5(f"{row.get('date')}{row.get('name')}{row.get('amount')}".encode()).hexdigest(), axis=1)
-        
         df['bucket'] = 'SPEND'
         df['category'] = 'Uncategorized'
         
@@ -184,8 +182,7 @@ def clean_bank_file(uploaded_file, bank_choice):
         for c in req: 
             if c not in df.columns: df[c] = None
         return df[req].dropna(subset=['date'])
-        
-    except Exception as e: st.error(f"Error processing file: {e}"); st.stop()
+    except Exception as e: st.error(f"Error: {e}"); st.stop()
 
 def save_to_neon(df):
     engine = get_db_connection()
@@ -209,9 +206,9 @@ def save_to_neon(df):
 
 # --- MAIN APP ---
 init_db()
-tab1, tab_insights, tab_month, tab2, tab3 = st.tabs(["📊 Dashboard", "💡 Insights", "📅 Monthly", "⚡ Rules", "📂 Upload"])
+tab1, tab_life, tab_net, tab_insights, tab2, tab3 = st.tabs(["📊 Weekly", "📈 Life Balance", "🏦 Net Worth", "💡 Insights", "⚡ Rules", "📂 Upload"])
 
-# === TAB 1: WEEKLY DASHBOARD (Editable Detective) ===
+# === TAB 1: WEEKLY DASHBOARD ===
 with tab1:
     col_date, col_set = st.columns([2, 1])
     with col_date:
@@ -221,16 +218,15 @@ with tab1:
         st.caption(f"Showing: {start_of_week.strftime('%b %d')} - {end_of_week.strftime('%b %d')}")
 
     with col_set:
-        with st.expander("⚙️ Settings & Danger Zone"):
+        with st.expander("⚙️ Settings"):
             est_income = get_budget_setting("est_income", 4000.0)
             est_bills = get_budget_setting("est_bills", 1500.0)
             new_income = st.number_input("Income", value=est_income)
             new_bills = st.number_input("Fixed Bills", value=est_bills)
             if st.button("Save Settings"):
                 set_budget_setting("est_income", new_income); set_budget_setting("est_bills", new_bills); st.rerun()
-            
             st.divider()
-            if st.button("🗑️ Delete THIS WEEK'S Data"):
+            if st.button("🗑️ Delete THIS WEEK"):
                 with get_db_connection().connect() as conn:
                     conn.execute(text("DELETE FROM transactions WHERE date >= :s AND date <= :e"), {"s":start_of_week, "e":end_of_week})
                     conn.commit()
@@ -260,145 +256,163 @@ with tab1:
         
         st.divider()
         c1, c2 = st.columns(2)
-        
         with c1:
             st.subheader("🕵️ Spending Detective (Editable)")
-            st.caption("Spot an error? Change 'SPEND' to 'TRANSFER' here.")
             if not spend_only_df.empty:
-                edited_detective = st.data_editor(
-                    spend_only_df[['transaction_id', 'date', 'name', 'amount', 'bucket']], 
-                    column_config={
-                        "transaction_id": None, 
-                        "bucket": st.column_config.SelectboxColumn("Bucket", options=["SPEND", "BILL", "INCOME", "TRANSFER"], required=True)
-                    },
-                    hide_index=True, use_container_width=True, key="detective_editor"
-                )
-                if st.button("💾 Save Corrections", type="primary"):
+                edited_detective = st.data_editor(spend_only_df[['transaction_id', 'date', 'name', 'amount', 'bucket']], 
+                    column_config={"transaction_id": None, "bucket": st.column_config.SelectboxColumn("Bucket", options=["SPEND", "BILL", "INCOME", "TRANSFER"], required=True)},
+                    hide_index=True, use_container_width=True, key="detective_editor")
+                if st.button("💾 Save Fixes", type="primary"):
                     with get_db_connection().connect() as conn:
                         for i, row in edited_detective.iterrows():
-                            conn.execute(text("UPDATE transactions SET bucket = :b WHERE transaction_id = :id"), 
-                                         {"b": row['bucket'], "id": row['transaction_id']})
-                            conn.commit()
-                    st.success("Updated!"); st.rerun()
-            else: st.success("No spending this week!")
-                
+                            conn.execute(text("UPDATE transactions SET bucket = :b WHERE transaction_id = :id"), {"b": row['bucket'], "id": row['transaction_id']}); conn.commit()
+                    st.rerun()
+            else: st.success("No spending!")
         with c2:
             st.subheader("All Transactions")
             st.dataframe(week_df[['date', 'name', 'amount', 'bucket']].sort_values('date', ascending=False), hide_index=True, use_container_width=True)
 
-# === TAB 2: INSIGHTS (Wants Analysis) ===
-with tab_insights:
-    st.header("💡 Spending Insights")
-    if week_df.empty:
-        st.info("No data.")
-    else:
-        wants_cats = ["Dining Out", "Shopping", "Gambling", "Subscriptions", "Entertainment", "Personal Loan"]
-        wants_df = week_df[(week_df['category'].isin(wants_cats)) & (week_df['bucket'] == 'SPEND') & (week_df['amount'] < 0)].copy()
-        total_wants = abs(wants_df['amount'].sum())
+# === TAB 2: LIFE BALANCE (RUNNING TOTAL) ===
+with tab_life:
+    st.header("📈 The Life Balance")
+    st.caption("Are you winning or losing over time?")
+    
+    # Settings for Start Date
+    saved_start = get_str_setting("budget_start_date", "2025-01-01")
+    c_set, c_chart = st.columns([1, 3])
+    
+    with c_set:
+        start_date_input = st.date_input("Start Tracking From:", value=pd.to_datetime(saved_start))
+        if st.button("Update Start Date"):
+            set_budget_setting("budget_start_date", start_date_input.strftime('%Y-%m-%d'), is_str=True)
+            st.rerun()
+            
+    with c_chart:
+        if not df.empty:
+            # Logic: Calculate Cumulative Allowance vs Cumulative Spend
+            mask = df['date'] >= pd.Timestamp(start_date_input)
+            life_df = df[mask].copy()
+            
+            # 1. Get Weekly Allowance
+            wk_allow = (est_income - est_bills) / 4
+            daily_allow = wk_allow / 7
+            
+            # 2. Generate Daily Range
+            date_range = pd.date_range(start=start_date_input, end=datetime.now())
+            daily_data = pd.DataFrame(index=date_range)
+            daily_data['allowance'] = daily_allow
+            
+            # 3. Merge Spending
+            daily_spend = life_df[life_df['bucket'] == 'SPEND'].groupby('date')['amount'].sum().abs()
+            daily_data = daily_data.join(daily_spend).fillna(0)
+            daily_data = daily_data.rename(columns={'amount': 'spend'})
+            
+            # 4. Running Totals
+            daily_data['cum_allowance'] = daily_data['allowance'].cumsum()
+            daily_data['cum_spend'] = daily_data['spend'].cumsum()
+            daily_data['running_balance'] = daily_data['cum_allowance'] - daily_data['cum_spend']
+            
+            # 5. Chart
+            last_bal = daily_data['running_balance'].iloc[-1]
+            st.metric("Total Life Balance", f"${last_bal:,.2f}", delta="Surplus" if last_bal > 0 else "Deficit")
+            
+            fig = px.line(daily_data, y='running_balance', title="Running Surplus/Deficit Over Time")
+            fig.add_hline(y=0, line_dash="dash", line_color="gray")
+            st.plotly_chart(fig, use_container_width=True)
+
+# === TAB 3: NET WORTH & LOANS ===
+with tab_net:
+    st.header("🏦 Net Worth & Loans")
+    
+    # 1. ACCOUNTS TABLE
+    with st.expander("📝 Update Account Balances", expanded=True):
+        with get_db_connection().connect() as conn:
+            accounts_df = pd.read_sql("SELECT * FROM net_worth_accounts ORDER BY type", conn)
         
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            st.metric("Spent on 'Wants'", f"${total_wants:,.2f}")
-            st.write("Includes Dining Out, Shopping, Gambling, etc.")
-        with col2:
-            st.write("### ✂️ The 'What If' Machine")
-            all_cats = week_df[(week_df['amount'] < 0) & (week_df['bucket'] == 'SPEND')]['category'].unique()
-            sel_cats = st.multiselect("Included Categories:", options=all_cats, default=all_cats)
-            filtered_spend = week_df[(week_df['category'].isin(sel_cats)) & (week_df['bucket'] == 'SPEND') & (week_df['amount'] < 0)]['amount'].sum()
-            new_rem = weekly_allowance - abs(filtered_spend)
-            st.metric("New Remaining Balance", f"${new_rem:,.2f}")
-
-# === TAB 3: MONTHLY (Interactive Drill-Down) ===
-with tab_month:
-    st.header("📅 Monthly Overview")
-    sel_date = st.date_input("Select Month:", value=datetime.now(), key="month_picker")
-    start_month = sel_date.replace(day=1)
-    next_month = (start_month.replace(day=28) + timedelta(days=4)).replace(day=1)
-    end_month = next_month - timedelta(days=1)
-    
-    if not df.empty:
-        month_df = df[(df['date'] >= pd.Timestamp(start_month)) & (df['date'] <= pd.Timestamp(end_month))].copy()
-        if not month_df.empty:
-            inc_df = month_df[(month_df['bucket'] == 'INCOME') & (month_df['amount'] > 0)]
-            bill_df = month_df[(month_df['bucket'] == 'BILL') & (month_df['amount'] < 0)]
-            spend_df = month_df[(month_df['bucket'] == 'SPEND') & (month_df['amount'] < 0)]
-            
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Income", f"${inc_df['amount'].sum():,.0f}")
-            m2.metric("Bills", f"${abs(bill_df['amount'].sum()):,.0f}")
-            m3.metric("Spending", f"${abs(spend_df['amount'].sum()):,.0f}")
-            net = inc_df['amount'].sum() + bill_df['amount'].sum() + spend_df['amount'].sum()
-            m4.metric("Net Saved", f"${net:,.2f}", delta_color="normal" if net > 0 else "inverse")
-            st.divider()
-            
-            st.subheader("🔍 Deep Dive")
-            view_mode = st.radio("View:", ["Discretionary Spending", "Fixed Bills", "Income"], horizontal=True)
-            if view_mode == "Discretionary Spending": target_df = spend_df.copy()
-            elif view_mode == "Fixed Bills": target_df = bill_df.copy()
-            else: target_df = inc_df.copy()
-            
-            if not target_df.empty:
-                target_df['amount'] = target_df['amount'].abs()
-                c1, c2 = st.columns([1, 2])
-                with c1:
-                    fig = px.pie(target_df, values='amount', names='category', hole=0.4)
-                    fig.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=300)
-                    st.plotly_chart(fig, use_container_width=True)
-                with c2:
-                    avail_cats = sorted(target_df['category'].unique().tolist())
-                    sel_cat = st.selectbox("📂 Filter by Category:", ["Show All"] + avail_cats)
-                    display_df = target_df if sel_cat == "Show All" else target_df[target_df['category'] == sel_cat]
-                    st.dataframe(display_df[['date', 'name', 'category', 'amount']].sort_values('date', ascending=False), hide_index=True, use_container_width=True)
-            else: st.info(f"No {view_mode} found.")
-
-# === TAB 4: RULES & HISTORY ===
-with tab2:
-    st.header("⚡ Rules & Edits")
-    CAT_OPTIONS = ["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement", "Pets", "RX", "Savings", "Gambling", "Personal Loan"]
-    
-    with st.expander("➕ Add New Auto-Rule"):
-        with st.form("add_rule"):
-            c1, c2, c3 = st.columns([2, 1, 1])
-            with c1: nk = st.text_input("Name Contains...", placeholder="e.g. Walmart")
-            with c2: nc = st.selectbox("Category", CAT_OPTIONS)
-            with c3: nb = st.selectbox("Bucket", ["SPEND", "BILL", "INCOME", "TRANSFER"])
-            if st.form_submit_button("Save") and nk:
-                with get_db_connection().connect() as conn:
-                    conn.execute(text("INSERT INTO category_rules (keyword, category, bucket) VALUES (:k,:c,:b)"), {"k":nk,"c":nc,"b":nb}); conn.commit()
-                run_auto_categorization(); st.rerun()
-
-    st.divider(); st.subheader("🚨 Action Items"); todo = pd.read_sql("SELECT * FROM transactions WHERE category='Uncategorized'", get_db_connection())
-    if not todo.empty:
-        ed = st.data_editor(todo, column_config={"category":st.column_config.SelectboxColumn(options=CAT_OPTIONS),"bucket":st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"])}, hide_index=True)
-        if st.button("Save Actions"):
+        if accounts_df.empty:
+            # Default Data
+            default_data = pd.DataFrame([
+                {"name": "Chime Checking", "type": "Asset", "balance": 1500.00},
+                {"name": "Chime Savings", "type": "Asset", "balance": 5000.00},
+                {"name": "Car Loan", "type": "Liability", "balance": 12000.00},
+                {"name": "Personal Loan", "type": "Liability", "balance": 5000.00}
+            ])
             with get_db_connection().connect() as conn:
-                for i,r in ed.iterrows(): 
-                    if r['category']!='Uncategorized': conn.execute(text("UPDATE transactions SET category=:c, bucket=:b WHERE transaction_id=:i"),{"c":r['category'],"b":r['bucket'],"i":r['transaction_id']}); conn.commit()
+                for _, row in default_data.iterrows():
+                    conn.execute(text("INSERT INTO net_worth_accounts (name, type, balance) VALUES (:n, :t, :b)"), {"n":row['name'], "t":row['type'], "b":row['balance']})
+                conn.commit()
             st.rerun()
 
-    st.divider(); st.subheader("🔍 Full History (Unlimited Search)")
-    search_term = st.text_input("Search:", "")
-    query = "SELECT * FROM transactions WHERE category != 'Uncategorized'"
-    if search_term: 
-        query += f" AND (name ILIKE '%{search_term}%' OR amount::text LIKE '%{search_term}%') ORDER BY date DESC"
-    else: 
-        query += " ORDER BY date DESC LIMIT 50"
+        # Editable Table
+        edited_acc = st.data_editor(accounts_df, column_config={
+            "account_id": None,
+            "type": st.column_config.SelectboxColumn(options=["Asset", "Liability"]),
+            "balance": st.column_config.NumberColumn(format="$%.2f")
+        }, hide_index=True, num_rows="dynamic")
         
-    with get_db_connection().connect() as conn: h_df = pd.read_sql(text(query), conn)
-    ed_h = st.data_editor(h_df, column_config={"category":st.column_config.SelectboxColumn(options=CAT_OPTIONS),"bucket":st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"])}, hide_index=True)
-    if st.button("Update History"):
-        with get_db_connection().connect() as conn:
-            for i,r in ed_h.iterrows(): conn.execute(text("UPDATE transactions SET category=:c, bucket=:b WHERE transaction_id=:i"),{"c":r['category'],"b":r['bucket'],"i":r['transaction_id']}); conn.commit()
+        if st.button("💾 Save Balances"):
+            with get_db_connection().connect() as conn:
+                conn.execute(text("DELETE FROM net_worth_accounts")) # Simple wipe and replace
+                for _, row in edited_acc.iterrows():
+                    conn.execute(text("INSERT INTO net_worth_accounts (name, type, balance) VALUES (:n, :t, :b)"), 
+                                 {"n": row['name'], "t": row['type'], "b": row['balance']})
+                conn.commit()
+            st.success("Balances Saved!")
+            st.rerun()
+
+    # 2. METRICS
+    assets = edited_acc[edited_acc['type'] == 'Asset']['balance'].sum()
+    liabilities = edited_acc[edited_acc['type'] == 'Liability']['balance'].sum()
+    net_worth = assets - liabilities
+    
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total Assets", f"${assets:,.2f}")
+    m2.metric("Total Debt", f"${liabilities:,.2f}")
+    m3.metric("Net Worth", f"${net_worth:,.2f}", delta_color="normal" if net_worth > 0 else "inverse")
+    
+    # 3. CHART
+    chart_data = pd.DataFrame({
+        "Type": ["Assets", "Liabilities"],
+        "Amount": [assets, liabilities]
+    })
+    st.plotly_chart(px.bar(chart_data, x="Type", y="Amount", color="Type", title="Assets vs Liabilities"), use_container_width=True)
+
+# === TAB 4: INSIGHTS ===
+with tab_insights:
+    st.header("💡 Insights")
+    if not week_df.empty:
+        wants_cats = ["Dining Out", "Shopping", "Gambling", "Subscriptions", "Personal Loan"]
+        wants_df = week_df[(week_df['category'].isin(wants_cats)) & (week_df['bucket'] == 'SPEND') & (week_df['amount'] < 0)]
+        total_wants = abs(wants_df['amount'].sum())
+        c1, c2 = st.columns([1, 2])
+        c1.metric("Spent on 'Wants'", f"${total_wants:,.2f}")
+        
+        all_cats = week_df[(week_df['amount'] < 0) & (week_df['bucket'] == 'SPEND')]['category'].unique()
+        sel_cats = c2.multiselect("Filter Categories:", options=all_cats, default=all_cats)
+        filt_spend = week_df[(week_df['category'].isin(sel_cats)) & (week_df['bucket'] == 'SPEND') & (week_df['amount'] < 0)]['amount'].sum()
+        c2.metric("New Remaining", f"${(weekly_allowance - abs(filt_spend)):,.2f}")
+
+# === TAB 5: RULES ===
+with tab2:
+    st.header("⚡ Rules"); CAT_OPTIONS = ["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement", "Pets", "RX", "Savings", "Gambling", "Personal Loan"]
+    with st.expander("➕ Add Rule"):
+        with st.form("add"):
+            c1,c2,c3=st.columns([2,1,1]); nk=c1.text_input("Keyword"); nc=c2.selectbox("Cat", CAT_OPTIONS); nb=c3.selectbox("Bkt", ["SPEND","BILL","INCOME","TRANSFER"])
+            if st.form_submit_button("Save"):
+                with get_db_connection().connect() as c: c.execute(text("INSERT INTO category_rules (keyword, category, bucket) VALUES (:k,:c,:b)"), {"k":nk,"c":nc,"b":nb}); c.commit()
+                run_auto_categorization(); st.rerun()
+    st.divider(); st.subheader("🔍 Full History"); s=st.text_input("Search:", "")
+    q = "SELECT * FROM transactions WHERE category != 'Uncategorized'" + (f" AND (name ILIKE '%{s}%' OR amount::text LIKE '%{s}%')" if s else " ORDER BY date DESC LIMIT 50")
+    with get_db_connection().connect() as c: h=pd.read_sql(text(q),c)
+    ed=st.data_editor(h, column_config={"category":st.column_config.SelectboxColumn(options=CAT_OPTIONS),"bucket":st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"])}, hide_index=True)
+    if st.button("Update"): 
+        with get_db_connection().connect() as c: 
+            for _,r in ed.iterrows(): c.execute(text("UPDATE transactions SET category=:c, bucket=:b WHERE transaction_id=:i"),{"c":r['category'],"b":r['bucket'],"i":r['transaction_id']}); c.commit()
         st.rerun()
 
-# === TAB 5: UPLOAD ===
+# === TAB 6: UPLOAD ===
 with tab3:
-    st.header("Upload"); bc = st.selectbox("Bank", ["Chase","Citi","Sofi","Chime"]); f = st.file_uploader("CSV/PDF", type=['csv','pdf'])
+    st.header("Upload"); bc = st.selectbox("Bank", ["Chase","Citi","Sofi","Chime","Loan/Other"]); f = st.file_uploader("CSV/PDF", type=['csv','pdf'])
     if f: 
         df = clean_bank_file(f, bc); st.dataframe(df.head(), hide_index=True)
         if st.button("Confirm"): c=save_to_neon(df); st.success(f"{c} added!"); st.rerun()
-    st.divider()
-    if st.button("Delete Old Data"):
-        d = st.date_input("Before:", value=pd.to_datetime("2025-10-01"))
-        with get_db_connection().connect() as conn: conn.execute(text("DELETE FROM transactions WHERE date < :d"), {"d":d}); conn.commit()
-        st.success("Deleted!"); st.rerun()
