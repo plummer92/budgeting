@@ -122,47 +122,71 @@ def process_chime_pdf(uploaded_file):
 
 def clean_bank_file(uploaded_file, bank_choice):
     try:
-        if uploaded_file.name.endswith('.csv'):
+        # FIX: Convert filename to lowercase for checking
+        filename = uploaded_file.name.lower()
+        
+        # 1. HANDLE CSV
+        if filename.endswith('.csv'):
             df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
             df.columns = df.columns.str.strip().str.lower().str.replace('\ufeff', '')
-            # Simple mapping logic
+            
             if bank_choice == "Chase": 
                 if 'post date' in df.columns: df = df.rename(columns={'post date': 'date'})
                 elif 'transaction date' in df.columns: df = df.rename(columns={'transaction date': 'date'})
                 if 'description' in df.columns: df = df.rename(columns={'description': 'name'})
+            
             elif bank_choice == "Citi":
+                # Citi columns: Status, Date, Description, Debit, Credit
                 df = df.rename(columns={'date': 'date', 'description': 'name'})
                 if 'debit' not in df.columns: df['debit'] = 0
                 if 'credit' not in df.columns: df['credit'] = 0
-                if 'amount' not in df.columns: df['amount'] = df['credit'].fillna(0) - df['debit'].fillna(0)
+                # Calculate Amount if missing (Credit is +, Debit is -)
+                if 'amount' not in df.columns: 
+                    df['amount'] = df['credit'].fillna(0) - df['debit'].fillna(0)
+            
             elif bank_choice == "Sofi":
                 if 'payment date' in df.columns: df = df.rename(columns={'payment date': 'date'})
                 df = df.rename(columns={'description': 'name'})
+            
             elif bank_choice == "Chime":
                 df = df.rename(columns={'transaction date': 'date', 'description': 'name'})
+            
             df['source'] = bank_choice
             
-        elif uploaded_file.name.endswith('.pdf') and bank_choice == "Chime":
+        # 2. HANDLE PDF
+        elif filename.endswith('.pdf') and bank_choice == "Chime":
             df = process_chime_pdf(uploaded_file)
         else:
-            st.error("Unsupported file."); st.stop()
+            st.error(f"Unsupported file type: {uploaded_file.name}")
+            st.stop()
 
+        # --- CLEANUP & STANDARDIZE ---
         if 'amount' not in df.columns: df['amount'] = 0.0
+        
+        # Clean currency strings if needed
         if df['amount'].dtype == 'object':
             df['amount'] = df['amount'].astype(str).str.replace('$', '').str.replace(',', '')
             df['amount'] = pd.to_numeric(df['amount'])
             
         df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+        
+        # Generate ID
         df['transaction_id'] = df.apply(lambda row: hashlib.md5(f"{row.get('date')}{row.get('name')}{row.get('amount')}".encode()).hexdigest(), axis=1)
+        
+        # Default Columns
         df['bucket'] = 'SPEND'
         df['category'] = 'Uncategorized'
         
+        # Return only what we need
         req = ['transaction_id', 'date', 'name', 'amount', 'category', 'bucket', 'source']
         for c in req: 
             if c not in df.columns: df[c] = None
+            
         return df[req].dropna(subset=['date'])
-    except Exception as e: st.error(f"Error: {e}"); st.stop()
 
+    except Exception as e: 
+        st.error(f"Error processing file: {e}")
+        st.stop()
 def save_to_neon(df):
     engine = get_db_connection()
     count = 0
