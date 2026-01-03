@@ -392,20 +392,61 @@ with tab_insights:
         filt_spend = week_df[(week_df['category'].isin(sel_cats)) & (week_df['bucket'] == 'SPEND') & (week_df['amount'] < 0)]['amount'].sum()
         c2.metric("New Remaining", f"${(weekly_allowance - abs(filt_spend)):,.2f}")
 
-# === TAB 5: RULES ===
+# === TAB 5: RULES & INBOX ===
 with tab2:
-    st.header("⚡ Rules"); CAT_OPTIONS = ["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement", "Pets", "RX", "Savings", "Gambling", "Personal Loan"]
-    with st.expander("➕ Add Rule"):
+    st.header("⚡ Rules & Inbox")
+    CAT_OPTIONS = ["Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement", "Pets", "RX", "Savings", "Gambling", "Personal Loan", "Uncategorized"]
+    
+    # --- 1. ADD NEW RULE ---
+    with st.expander("➕ Add Auto-Rule"):
         with st.form("add"):
-            c1,c2,c3=st.columns([2,1,1]); nk=c1.text_input("Keyword"); nc=c2.selectbox("Cat", CAT_OPTIONS); nb=c3.selectbox("Bkt", ["SPEND","BILL","INCOME","TRANSFER"])
-            if st.form_submit_button("Save"):
+            c1,c2,c3=st.columns([2,1,1]); nk=c1.text_input("If Name Contains..."); nc=c2.selectbox("Set Category", CAT_OPTIONS); nb=c3.selectbox("Set Bucket", ["SPEND","BILL","INCOME","TRANSFER"])
+            if st.form_submit_button("Save Rule"):
                 with get_db_connection().connect() as c: c.execute(text("INSERT INTO category_rules (keyword, category, bucket) VALUES (:k,:c,:b)"), {"k":nk,"c":nc,"b":nb}); c.commit()
                 run_auto_categorization(); st.rerun()
-    st.divider(); st.subheader("🔍 Full History"); s=st.text_input("Search:", "")
-    q = "SELECT * FROM transactions WHERE category != 'Uncategorized'" + (f" AND (name ILIKE '%{s}%' OR amount::text LIKE '%{s}%')" if s else " ORDER BY date DESC LIMIT 50")
+
+    # --- 2. ACTION ITEMS (THE MISSING PIECE) ---
+    st.divider()
+    st.subheader("🚨 Inbox: New Uploads")
+    
+    with get_db_connection().connect() as conn:
+        # Fetch ONLY Uncategorized items
+        todo = pd.read_sql("SELECT * FROM transactions WHERE category='Uncategorized'", conn)
+    
+    if not todo.empty:
+        st.info(f"You have {len(todo)} new transactions to sort.")
+        # Editable table for quick sorting
+        ed_todo = st.data_editor(todo, column_config={
+            "transaction_id": None,
+            "category": st.column_config.SelectboxColumn(options=CAT_OPTIONS, required=True),
+            "bucket": st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"], required=True)
+        }, hide_index=True, use_container_width=True)
+        
+        if st.button("💾 Save Inbox Changes"):
+            with get_db_connection().connect() as c:
+                for _, r in ed_todo.iterrows():
+                    if r['category'] != 'Uncategorized': # Only save if you actually changed it
+                        c.execute(text("UPDATE transactions SET category=:c, bucket=:b WHERE transaction_id=:i"),
+                                  {"c":r['category'],"b":r['bucket'],"i":r['transaction_id']})
+                c.commit()
+            st.success("Saved!"); st.rerun()
+    else:
+        st.success("🎉 Inbox Zero! All transactions are categorized.")
+
+    # --- 3. FULL HISTORY ---
+    st.divider(); st.subheader("🔍 Full History"); s=st.text_input("Search History:", "")
+    # REMOVED the "WHERE category != 'Uncategorized'" filter so you can see everything if you want
+    q = "SELECT * FROM transactions WHERE 1=1" + (f" AND (name ILIKE '%{s}%' OR amount::text LIKE '%{s}%')" if s else " ORDER BY date DESC LIMIT 50")
+    
     with get_db_connection().connect() as c: h=pd.read_sql(text(q),c)
-    ed=st.data_editor(h, column_config={"category":st.column_config.SelectboxColumn(options=CAT_OPTIONS),"bucket":st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"])}, hide_index=True)
-    if st.button("Update"): 
+    
+    ed=st.data_editor(h, column_config={
+        "transaction_id": None,
+        "category": st.column_config.SelectboxColumn(options=CAT_OPTIONS),
+        "bucket": st.column_config.SelectboxColumn(options=["SPEND","BILL","INCOME","TRANSFER"])
+    }, hide_index=True, use_container_width=True)
+    
+    if st.button("Update History"): 
         with get_db_connection().connect() as c: 
             for _,r in ed.iterrows(): c.execute(text("UPDATE transactions SET category=:c, bucket=:b WHERE transaction_id=:i"),{"c":r['category'],"b":r['bucket'],"i":r['transaction_id']}); c.commit()
         st.rerun()
