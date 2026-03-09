@@ -785,87 +785,19 @@ with tab_plaid:
             link_token = None
 
         if link_token:
-            # Get the current app URL to use as the redirect back destination
-            app_url = st.query_params.get("_stcore_host", "")
 
-            # Build a full standalone HTML page that runs Plaid Link and
-            # redirects back to the Streamlit app with the public token.
-            # This opens in a new tab, bypassing Streamlit's iframe sandbox.
-            plaid_page_html = f"""<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Connect Your Bank</title>
-  <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
-  <style>
-    body {{ font-family: -apple-system, sans-serif; display: flex; align-items: center;
-           justify-content: center; height: 100vh; margin: 0; background: #f0f2f6; }}
-    .card {{ background: white; border-radius: 16px; padding: 40px; text-align: center;
-             box-shadow: 0 4px 24px rgba(0,0,0,0.1); max-width: 400px; width: 90%; }}
-    h2 {{ margin-bottom: 8px; color: #1a1a2e; }}
-    p  {{ color: #666; margin-bottom: 28px; }}
-    button {{ background: #4CAF50; color: white; border: none; padding: 14px 32px;
-              font-size: 16px; border-radius: 8px; cursor: pointer; font-weight: bold;
-              width: 100%; }}
-    button:hover {{ background: #43a047; }}
-    #status {{ margin-top: 16px; color: #666; font-size: 14px; min-height: 20px; }}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>🏦 Connect Your Bank</h2>
-    <p>Your credentials go directly to your bank.<br>We only receive a secure token.</p>
-    <button onclick="openLink()">Launch Bank Login</button>
-    <div id="status"></div>
-  </div>
-  <script>
-    var RETURN_URL = "{st.get_option('browser.serverAddress') or ''}";
+            # Build the URL to the static Plaid Link page, passing the
+            # link_token and the current app URL as query params
+            import urllib.parse
+            return_url  = f"https://{st.context.headers.get('host', 'localhost')}"
+            plaid_page_url = (
+                f"app/static/plaid_link.html"
+                f"?link_token={urllib.parse.quote(link_token)}"
+                f"&return_url={urllib.parse.quote(return_url)}"
+            )
 
-    // Auto-open Plaid Link as soon as the page loads
-    window.onload = function() {{
-      openLink();
-    }};
-
-    function openLink() {{
-      document.getElementById('status').innerText = 'Opening secure login...';
-      var handler = Plaid.create({{
-        token: '{link_token}',
-        onSuccess: function(public_token, metadata) {{
-          document.getElementById('status').innerText = 'Bank linked! Returning to app...';
-          // Redirect back to the Streamlit app with the token as a query param
-          var returnUrl = window.opener
-            ? new URL(window.opener.location.href)
-            : new URL(document.referrer || window.location.href);
-          returnUrl.searchParams.set('plaid_public_token', public_token);
-          if (window.opener) {{
-            window.opener.location.href = returnUrl.toString();
-            window.close();
-          }} else {{
-            window.location.href = returnUrl.toString();
-          }}
-        }},
-        onExit: function(err, metadata) {{
-          if (err) {{
-            document.getElementById('status').innerText = 'Error: ' + (err.display_message || err.error_message);
-          }} else {{
-            document.getElementById('status').innerText = 'Cancelled. You can close this tab.';
-          }}
-        }},
-      }});
-      handler.open();
-    }}
-  </script>
-</body>
-</html>"""
-
-            # Encode the page as a data URI so we can open it in a new tab
-            import base64
-            encoded = base64.b64encode(plaid_page_html.encode()).decode()
-            data_uri = f"data:text/html;base64,{encoded}"
-
-            # Show a button that opens the Plaid page in a new tab
             st.markdown(f"""
-            <a href="{data_uri}" target="_blank" style="
+            <a href="{plaid_page_url}" target="_blank" style="
                 display: inline-block;
                 background: #4CAF50;
                 color: white;
@@ -879,7 +811,7 @@ with tab_plaid:
             </a>
             """, unsafe_allow_html=True)
 
-            st.caption("A new tab will open with a secure bank login. After connecting, you'll be returned here automatically.")
+            st.caption("A new tab will open with a secure bank login. After connecting, you'll be returned to this page automatically.")
             st.caption("🔒 Bank-grade encryption. Plaid is trusted by Venmo, Coinbase, and Robinhood.")
 
     # ------------------------------------------------------------------ #
