@@ -7,96 +7,183 @@
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       display: flex; align-items: center; justify-content: center;
-      height: 100vh; margin: 0; background: #f0f2f6;
+      min-height: 100vh; margin: 0; background: #f0f2f6; padding: 20px;
+      box-sizing: border-box;
     }
     .card {
       background: white; border-radius: 16px; padding: 40px;
       text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.1);
-      max-width: 420px; width: 90%;
+      max-width: 520px; width: 100%;
     }
     h2 { margin-bottom: 8px; color: #1a1a2e; }
-    p  { color: #666; margin-bottom: 28px; line-height: 1.5; }
+    p  { color: #666; margin-bottom: 20px; line-height: 1.5; }
     button {
       background: #4CAF50; color: white; border: none;
       padding: 14px 32px; font-size: 16px; border-radius: 8px;
-      cursor: pointer; font-weight: bold; width: 100%;
+      cursor: pointer; font-weight: bold; width: 100%; margin-bottom: 10px;
     }
-    button:hover { background: #43a047; }
     button:disabled { background: #aaa; cursor: not-allowed; }
-    #status { margin-top: 16px; color: #666; font-size: 14px; min-height: 20px; }
-    #error  { margin-top: 16px; color: red;  font-size: 13px; display: none; }
-    .lock   { font-size: 12px; color: #999; margin-top: 20px; }
+    #status { margin: 10px 0; color: #555; font-size: 14px; min-height: 20px; font-weight: bold; }
+
+    /* Debug panel */
+    #debug-panel {
+      margin-top: 24px; text-align: left; border-top: 1px solid #eee; padding-top: 16px;
+    }
+    #debug-panel summary {
+      cursor: pointer; font-size: 13px; color: #888; margin-bottom: 8px;
+    }
+    #debug-log {
+      background: #1e1e1e; color: #d4d4d4; border-radius: 8px;
+      padding: 12px; font-size: 12px; font-family: monospace;
+      max-height: 300px; overflow-y: auto; white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .log-ok   { color: #4ec94e; }
+    .log-err  { color: #f47174; }
+    .log-info { color: #9cdcfe; }
+    .log-warn { color: #dcdcaa; }
+    .copy-btn {
+      background: #333; color: #ccc; border: 1px solid #555;
+      padding: 4px 10px; border-radius: 4px; font-size: 11px;
+      cursor: pointer; float: right; margin-top: -4px; width: auto;
+    }
   </style>
 </head>
 <body>
   <div class="card">
     <h2>&#127974; Connect Your Bank</h2>
-    <p>Your login credentials go directly to your bank.<br>We only ever receive a secure token.</p>
-    <button id="btn" onclick="openLink()" disabled>Loading...</button>
-    <div id="status"></div>
-    <div id="error"></div>
-    <p class="lock">&#128274; 256-bit encryption &middot; Trusted by Venmo, Coinbase &amp; Robinhood</p>
+    <p>Your login credentials go directly to your bank.<br>We only receive a secure token.</p>
+    <button id="btn" onclick="openLink()" disabled>Loading Plaid...</button>
+    <div id="status">Initializing...</div>
+
+    <details id="debug-panel" open>
+      <summary>&#128270; Troubleshoot Log <button class="copy-btn" onclick="copyLog()">Copy Log</button></summary>
+      <div id="debug-log"></div>
+    </details>
   </div>
 
   <script>
-    var params     = new URLSearchParams(window.location.search);
-    var linkToken  = params.get('link_token');
-    var returnUrl  = params.get('return_url');
-
-    function showError(msg) {
-      var el = document.getElementById('error');
-      el.innerText = 'Error: ' + msg;
-      el.style.display = 'block';
-      document.getElementById('btn').disabled = false;
-      document.getElementById('btn').innerText = 'Try Again';
+    // ── Logging ──────────────────────────────────────────────────────────
+    var logEl = document.getElementById('debug-log');
+    function log(msg, type) {
+      var ts   = new Date().toISOString().substr(11, 12);
+      var cls  = type || 'log-info';
+      var line = document.createElement('div');
+      line.className = cls;
+      line.textContent = '[' + ts + '] ' + msg;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+      console.log(msg);
+    }
+    function copyLog() {
+      navigator.clipboard.writeText(logEl.innerText).then(function() {
+        alert('Log copied to clipboard!');
+      });
     }
 
+    // ── Read URL params ───────────────────────────────────────────────────
+    var params    = new URLSearchParams(window.location.search);
+    var linkToken = params.get('link_token');
+    var returnUrl = params.get('return_url');
+
+    log('Page loaded', 'log-ok');
+    log('Full URL: ' + window.location.href, 'log-info');
+    log('link_token present: ' + (linkToken ? 'YES (' + linkToken.substr(0,30) + '...)' : 'NO -- MISSING'), linkToken ? 'log-ok' : 'log-err');
+    log('return_url: ' + (returnUrl || 'NOT SET'), returnUrl ? 'log-ok' : 'log-warn');
+
+    function setStatus(msg) {
+      document.getElementById('status').innerText = msg;
+    }
+
+    // ── Validate token ────────────────────────────────────────────────────
     if (!linkToken) {
-      showError('Missing link token. Please go back to the app and try again.');
+      log('FATAL: No link_token in URL. Cannot proceed.', 'log-err');
+      setStatus('Error: missing link token');
+      document.getElementById('btn').innerText = 'Missing Token';
     } else {
-      var script = document.createElement('script');
-      script.src = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
+      // ── Load Plaid script dynamically ─────────────────────────────────
+      log('Loading Plaid Link script from CDN...', 'log-info');
+      var script   = document.createElement('script');
+      script.src   = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
+
       script.onload = function() {
-        document.getElementById('btn').disabled = false;
+        log('Plaid script loaded OK', 'log-ok');
+        log('Plaid global available: ' + (typeof Plaid !== 'undefined' ? 'YES' : 'NO'), typeof Plaid !== 'undefined' ? 'log-ok' : 'log-err');
+        document.getElementById('btn').disabled  = false;
         document.getElementById('btn').innerText = 'Launch Bank Login';
-        document.getElementById('status').innerText = 'Ready!';
-        setTimeout(openLink, 600);
+        setStatus('Ready! Auto-opening in 1 second...');
+        setTimeout(openLink, 1000);
       };
+
       script.onerror = function() {
-        showError('Could not load Plaid. Check your internet connection.');
+        log('FATAL: Failed to load Plaid script from CDN. Check network/firewall.', 'log-err');
+        setStatus('Error: could not load Plaid');
+        document.getElementById('btn').disabled  = false;
+        document.getElementById('btn').innerText = 'Retry';
       };
+
       document.head.appendChild(script);
     }
 
+    // ── Open Plaid Link ───────────────────────────────────────────────────
     function openLink() {
       if (typeof Plaid === 'undefined') {
-        showError('Plaid not loaded yet. Please click Try Again.');
+        log('ERROR: Plaid is not defined. Script may not have loaded.', 'log-err');
+        setStatus('Plaid not ready — click Retry');
+        document.getElementById('btn').disabled  = false;
+        document.getElementById('btn').innerText = 'Retry';
         return;
       }
+
+      log('Calling Plaid.create() with token...', 'log-info');
       document.getElementById('btn').disabled = true;
-      document.getElementById('status').innerText = 'Opening secure bank login...';
+      setStatus('Opening secure bank login...');
+
       try {
         var handler = Plaid.create({
           token: linkToken,
+
           onSuccess: function(publicToken, metadata) {
-            document.getElementById('status').innerText = 'Bank linked! Returning to app...';
+            log('onSuccess fired!', 'log-ok');
+            log('Institution: ' + (metadata.institution ? metadata.institution.name : 'unknown'), 'log-ok');
+            log('public_token: ' + publicToken.substr(0, 30) + '...', 'log-ok');
+            setStatus('Bank linked! Redirecting back to app...');
             var dest = new URL(returnUrl || window.location.href);
             dest.searchParams.set('plaid_public_token', publicToken);
+            log('Redirecting to: ' + dest.toString().substr(0, 80) + '...', 'log-info');
             window.location.href = dest.toString();
           },
+
           onExit: function(err, metadata) {
-            document.getElementById('btn').disabled = false;
+            document.getElementById('btn').disabled  = false;
             document.getElementById('btn').innerText = 'Launch Bank Login';
             if (err) {
-              showError(err.display_message || err.error_message || 'Something went wrong.');
+              log('onExit with error:', 'log-err');
+              log('  error_type: '    + (err.error_type    || 'none'), 'log-err');
+              log('  error_code: '    + (err.error_code    || 'none'), 'log-err');
+              log('  error_message: ' + (err.error_message || 'none'), 'log-err');
+              log('  display_message: ' + (err.display_message || 'none'), 'log-err');
+              setStatus('Error — see log below');
             } else {
-              document.getElementById('status').innerText = 'Cancelled. Click the button to try again.';
+              log('onExit: user closed without completing', 'log-warn');
+              log('  status: ' + (metadata.status || 'unknown'), 'log-warn');
+              setStatus('Cancelled. Click button to try again.');
             }
+          },
+
+          onEvent: function(eventName, metadata) {
+            log('Event: ' + eventName, 'log-info');
           }
         });
+
+        log('handler.open() called...', 'log-info');
         handler.open();
+
       } catch(e) {
-        showError('Failed to open Plaid Link: ' + e.message);
+        log('EXCEPTION in Plaid.create(): ' + e.message, 'log-err');
+        setStatus('Error — see log');
+        document.getElementById('btn').disabled  = false;
+        document.getElementById('btn').innerText = 'Retry';
       }
     }
   </script>
