@@ -795,123 +795,27 @@ with tab_plaid:
             host = st.context.headers.get('host', 'localhost')
             return_url = f"https://{host}"
 
-            # Inject Plaid Link directly via st.components srcdoc —
-            # avoids the static file MIME type limitation entirely.
-            plaid_html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: -apple-system, sans-serif; padding: 16px; background: #f8f9fa; }}
-    iframe {{ position: fixed !important; top: 0 !important; left: 0 !important;
-              width: 100vw !important; height: 100vh !important; z-index: 9999 !important;
-              border: none !important; }}
-    button {{
-      background: #4CAF50; color: white; border: none;
-      padding: 12px 24px; font-size: 15px; border-radius: 8px;
-      cursor: pointer; font-weight: bold; width: 100%; margin-bottom: 10px;
-    }}
-    button:disabled {{ background: #aaa; cursor: not-allowed; }}
-    #status {{ font-size: 13px; color: #555; margin-bottom: 8px; }}
-    #log {{ background: #1e1e1e; color: #d4d4d4; border-radius: 6px;
-             padding: 10px; font-size: 11px; font-family: monospace;
-             max-height: 160px; overflow-y: auto; white-space: pre-wrap; }}
-    .ok  {{ color: #4ec94e; }} .err {{ color: #f47174; }}
-    .inf {{ color: #9cdcfe; }} .wrn {{ color: #dcdcaa; }}
-  </style>
-</head>
-<body>
-  <button id="btn" disabled onclick="openLink()">Loading Plaid...</button>
-  <div id="status">Initializing...</div>
-  <div id="log"></div>
-  <script>
-    var linkToken = "{link_token}";
-    var returnUrl = "{return_url}";
-    var logEl = document.getElementById('log');
+            # Redirect the full browser tab to the GitHub Pages hosted
+            # Plaid Link page — avoids all iframe sandbox restrictions
+            PLAID_LINK_PAGE = "https://plummer92.github.io/budgeting/static/plaid_link.html"
+            plaid_page_url = (
+                f"{PLAID_LINK_PAGE}"
+                f"?link_token={urllib.parse.quote(link_token)}"
+                f"&return_url={urllib.parse.quote(return_url)}"
+            )
 
-    function log(msg, cls) {{
-      var d = document.createElement('div');
-      d.className = cls || 'inf';
-      d.textContent = new Date().toTimeString().substr(0,8) + ' ' + msg;
-      logEl.appendChild(d);
-      logEl.scrollTop = logEl.scrollHeight;
-    }}
-
-    function setStatus(msg) {{ document.getElementById('status').textContent = msg; }}
-
-    log('Initializing...', 'inf');
-    log('Token: ' + linkToken.substr(0,35) + '...', 'inf');
-
-    var s = document.createElement('script');
-    s.src = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
-    s.onload = function() {{
-      log('Plaid script loaded OK', 'ok');
-      document.getElementById('btn').disabled = false;
-      document.getElementById('btn').textContent = 'Launch Bank Login';
-      setStatus('Ready!');
-      setTimeout(openLink, 700);
-    }};
-    s.onerror = function() {{
-      log('Failed to load Plaid script!', 'err');
-      setStatus('Error loading Plaid');
-      document.getElementById('btn').disabled = false;
-      document.getElementById('btn').textContent = 'Retry';
-    }};
-    document.head.appendChild(s);
-
-    function openLink() {{
-      if (typeof Plaid === 'undefined') {{
-        log('Plaid not defined yet', 'err'); return;
-      }}
-      log('Opening Plaid Link...', 'inf');
-      document.getElementById('btn').disabled = true;
-      setStatus('Opening bank login...');
-      try {{
-        Plaid.create({{
-          token: linkToken,
-          onSuccess: function(pub, meta) {{
-            log('SUCCESS: ' + (meta.institution ? meta.institution.name : 'unknown'), 'ok');
-            setStatus('Bank linked! Redirecting...');
-            var dest = new URL(returnUrl);
-            dest.searchParams.set('plaid_public_token', pub);
-            // Post token to parent Streamlit window
-            window.parent.postMessage({{ type: 'plaid_success', url: dest.toString() }}, '*');
-          }},
-          onExit: function(err, meta) {{
-            document.getElementById('btn').disabled = false;
-            document.getElementById('btn').textContent = 'Launch Bank Login';
-            if (err) {{
-              log('EXIT ERROR: ' + (err.error_code || '') + ' ' + (err.display_message || err.error_message || ''), 'err');
-              setStatus('Error — see log');
-            }} else {{
-              log('User exited (status: ' + (meta.status||'unknown') + ')', 'wrn');
-              setStatus('Cancelled. Click button to retry.');
-            }}
-          }},
-          onEvent: function(ev) {{ log('Event: ' + ev, 'inf'); }}
-        }}).open();
-      }} catch(e) {{
-        log('EXCEPTION: ' + e.message, 'err');
-        setStatus('Error — see log');
-        document.getElementById('btn').disabled = false;
-      }}
-    }}
-  </script>
-  <script>
-    // Listen for success message and redirect the TOP window
-    window.addEventListener('message', function(e) {{
-      if (e.data && e.data.type === 'plaid_success') {{
-        window.top.location.href = e.data.url;
-      }}
-    }});
-  </script>
-</body>
-</html>"""
-
-            st.info("👇 The bank login will open automatically below. Complete the login, then you'll be redirected back.")
-            st.components.v1.html(plaid_html, height=600, scrolling=True)
+            st.markdown(f"""
+            <a href="{plaid_page_url}" style="
+                display: inline-block;
+                background: #4CAF50; color: white;
+                padding: 14px 32px; font-size: 16px;
+                font-weight: bold; border-radius: 8px;
+                text-decoration: none; margin-top: 8px;">
+                🏦 Connect a Bank Account
+            </a>
+            """, unsafe_allow_html=True)
+            st.caption("You'll be taken to a secure login page, then redirected back here automatically.")
+            st.caption("🔒 Bank-grade encryption. Plaid is trusted by Venmo, Coinbase, and Robinhood.")
 
     # ------------------------------------------------------------------ #
     # SECTION 4 — Setup instructions                                      #
