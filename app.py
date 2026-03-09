@@ -805,6 +805,9 @@ with tab_plaid:
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{ font-family: -apple-system, sans-serif; padding: 16px; background: #f8f9fa; }}
+    iframe {{ position: fixed !important; top: 0 !important; left: 0 !important;
+              width: 100vw !important; height: 100vh !important; z-index: 9999 !important;
+              border: none !important; }}
     button {{
       background: #4CAF50; color: white; border: none;
       padding: 12px 24px; font-size: 15px; border-radius: 8px;
@@ -908,7 +911,7 @@ with tab_plaid:
 </html>"""
 
             st.info("👇 The bank login will open automatically below. Complete the login, then you'll be redirected back.")
-            st.components.v1.html(plaid_html, height=320, scrolling=False)
+            st.components.v1.html(plaid_html, height=600, scrolling=True)
 
     # ------------------------------------------------------------------ #
     # SECTION 4 — Setup instructions                                      #
