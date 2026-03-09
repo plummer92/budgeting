@@ -3,6 +3,8 @@ import pandas as pd
 import os
 import hashlib
 import re
+import requests
+import json
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from datetime import datetime, timedelta
@@ -14,6 +16,29 @@ load_dotenv()
 
 # --- CONFIG ---
 st.set_page_config(page_title="My Budget Master", layout="wide", page_icon="💰")
+
+# --- PLAID CONFIG ---
+PLAID_CLIENT_ID = os.getenv("PLAID_CLIENT_ID") or st.secrets.get("PLAID_CLIENT_ID", "")
+PLAID_SECRET    = os.getenv("PLAID_SECRET")    or st.secrets.get("PLAID_SECRET", "")
+PLAID_ENV       = os.getenv("PLAID_ENV", "sandbox")  # "sandbox" | "development" | "production"
+PLAID_BASE_URL  = {
+    "sandbox":     "https://sandbox.plaid.com",
+    "development": "https://development.plaid.com",
+    "production":  "https://production.plaid.com",
+}.get(PLAID_ENV, "https://sandbox.plaid.com")
+
+def plaid_post(endpoint, payload):
+    """Make an authenticated POST request to Plaid."""
+    payload["client_id"] = PLAID_CLIENT_ID
+    payload["secret"]    = PLAID_SECRET
+    resp = requests.post(
+        f"{PLAID_BASE_URL}{endpoint}",
+        headers={"Content-Type": "application/json"},
+        data=json.dumps(payload),
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 # --- DATABASE CONNECTION ---
 @st.cache_resource
@@ -75,6 +100,29 @@ def init_db():
                 name TEXT NOT NULL,
                 type TEXT NOT NULL, -- 'Asset' or 'Liability'
                 balance NUMERIC NOT NULL
+            );
+        """))
+        # 6. Plaid Items (one row per connected bank)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS plaid_items (
+                item_id TEXT PRIMARY KEY,
+                access_token TEXT NOT NULL,
+                institution_name TEXT,
+                linked_at TIMESTAMP DEFAULT NOW()
+            );
+        """))
+        # 7. Plaid Accounts (checking, savings, credit cards, etc.)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS plaid_accounts (
+                account_id TEXT PRIMARY KEY,
+                item_id TEXT REFERENCES plaid_items(item_id) ON DELETE CASCADE,
+                name TEXT,
+                official_name TEXT,
+                type TEXT,
+                subtype TEXT,
+                current_balance NUMERIC,
+                available_balance NUMERIC,
+                last_synced TIMESTAMP
             );
         """))
         conn.commit()
@@ -230,9 +278,143 @@ def save_to_neon(df):
         conn.commit()
     return count
 
+# --- PLAID HELPERS ---
+
+def plaid_create_link_token():
+    """Create a link token to initialize Plaid Link."""
+    payload = {
+        "user": {"client_user_id": "budget-master-user"},
+        "client_name": "My Budget Master",
+        "products": ["transactions"],
+        "country_codes": ["US"],
+        "language": "en",
+    }
+    data = plaid_post("/link/token/create", payload)
+    return data.get("link_token")
+
+def plaid_exchange_public_token(public_token):
+    """Exchange a public token for a permanent access token."""
+    data = plaid_post("/item/public_token/exchange", {"public_token": public_token})
+    return data.get("access_token"), data.get("item_id")
+
+def plaid_get_institution_name(institution_id):
+    """Get human-readable institution name."""
+    try:
+        data = plaid_post("/institutions/get_by_id", {
+            "institution_id": institution_id,
+            "country_codes": ["US"],
+        })
+        return data["institution"]["name"]
+    except Exception:
+        return "Unknown Bank"
+
+def plaid_sync_item(access_token, item_id, institution_name):
+    """
+    Sync transactions for one linked bank using /transactions/sync.
+    Returns (new_count, updated_accounts_list).
+    """
+    engine = get_db_connection()
+
+    # Retrieve stored cursor for this item
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT str_value FROM budget_settings WHERE key_name = :k"),
+            {"k": f"plaid_cursor_{item_id}"}
+        ).fetchone()
+        cursor = row[0] if row and row[0] else ""
+
+    added_total = 0
+    has_more = True
+
+    while has_more:
+        payload = {"access_token": access_token}
+        if cursor:
+            payload["cursor"] = cursor
+
+        data = plaid_post("/transactions/sync", payload)
+        added       = data.get("added", [])
+        modified    = data.get("modified", [])
+        removed     = data.get("removed", [])
+        has_more    = data.get("has_more", False)
+        next_cursor = data.get("next_cursor", "")
+
+        rows_to_insert = []
+        for txn in added + modified:
+            if txn.get("pending"):
+                continue  # skip pending, re-import when settled
+            amount = txn.get("amount", 0)
+            # Plaid signs: positive = debit (money out), negative = credit (money in)
+            # We keep that convention. 
+            rows_to_insert.append({
+                "transaction_id": txn["transaction_id"],
+                "date":           txn.get("date"),
+                "name":           txn.get("merchant_name") or txn.get("name", ""),
+                "amount":         amount,
+                "category":       "Uncategorized",
+                "bucket":         "INCOME" if amount < 0 else "SPEND",
+                "source":         f"Plaid – {institution_name}",
+            })
+
+        if rows_to_insert:
+            added_total += save_to_neon(pd.DataFrame(rows_to_insert))
+
+        # Remove transactions Plaid says were deleted
+        if removed:
+            with engine.connect() as conn:
+                for r in removed:
+                    conn.execute(
+                        text("DELETE FROM transactions WHERE transaction_id = :tid"),
+                        {"tid": r["transaction_id"]}
+                    )
+                conn.commit()
+
+        cursor = next_cursor
+
+    # Persist updated cursor
+    with engine.connect() as conn:
+        conn.execute(text("""
+            INSERT INTO budget_settings (key_name, str_value)
+            VALUES (:k, :v)
+            ON CONFLICT (key_name) DO UPDATE SET str_value = :v
+        """), {"k": f"plaid_cursor_{item_id}", "v": cursor})
+        conn.commit()
+
+    # Update account balances from /accounts/get
+    try:
+        acc_data = plaid_post("/accounts/get", {"access_token": access_token})
+        with engine.connect() as conn:
+            for acc in acc_data.get("accounts", []):
+                conn.execute(text("""
+                    INSERT INTO plaid_accounts
+                        (account_id, item_id, name, official_name, type, subtype,
+                         current_balance, available_balance, last_synced)
+                    VALUES (:aid, :iid, :name, :oname, :type, :sub, :cur, :avail, NOW())
+                    ON CONFLICT (account_id) DO UPDATE SET
+                        current_balance   = EXCLUDED.current_balance,
+                        available_balance = EXCLUDED.available_balance,
+                        last_synced       = NOW()
+                """), {
+                    "aid":   acc["account_id"],
+                    "iid":   item_id,
+                    "name":  acc["name"],
+                    "oname": acc.get("official_name"),
+                    "type":  acc["type"],
+                    "sub":   acc.get("subtype"),
+                    "cur":   acc["balances"].get("current"),
+                    "avail": acc["balances"].get("available"),
+                })
+            conn.commit()
+    except Exception as e:
+        st.warning(f"Could not refresh account balances: {e}")
+
+    run_auto_categorization()
+    return added_total
+
 # --- MAIN APP ---
 init_db()
-tab1, tab_life, tab_net, tab_insights, tab2, tab3 = st.tabs(["📊 Weekly", "📈 Life Balance", "🏦 Net Worth", "💡 Insights", "⚡ Rules", "📂 Upload"])
+tab1, tab_life, tab_net, tab_insights, tab2, tab3, tab_plaid = st.tabs([
+    "📊 Weekly", "📈 Life Balance", "🏦 Net Worth", "💡 Insights", "⚡ Rules", "📂 Upload", "🔗 Connected Banks"
+])
 
 # === TAB 1: WEEKLY DASHBOARD ===
 with tab1:
@@ -479,3 +661,196 @@ with tab3:
     if f: 
         df = clean_bank_file(f, bc); st.dataframe(df.head(), hide_index=True)
         if st.button("Confirm"): c=save_to_neon(df); st.success(f"{c} added!"); st.rerun()
+
+# === TAB 7: CONNECTED BANKS (PLAID) ===
+with tab_plaid:
+    st.header("🔗 Connected Banks")
+    st.caption("Connect your bank accounts once — transactions sync automatically.")
+
+    if not PLAID_CLIENT_ID or not PLAID_SECRET:
+        st.error("⚠️ Plaid credentials not found. Add PLAID_CLIENT_ID, PLAID_SECRET, and PLAID_ENV to your .env or Streamlit secrets.")
+        st.stop()
+
+    # ------------------------------------------------------------------ #
+    # SECTION 1 — Currently connected banks                               #
+    # ------------------------------------------------------------------ #
+    with get_db_connection().connect() as conn:
+        items_df    = pd.read_sql("SELECT * FROM plaid_items ORDER BY linked_at DESC", conn)
+        accounts_df = pd.read_sql("SELECT * FROM plaid_accounts ORDER BY type, name", conn)
+
+    if items_df.empty:
+        st.info("No banks connected yet. Use the button below to link your first account.")
+    else:
+        st.subheader("Your Connected Accounts")
+        for _, item in items_df.iterrows():
+            with st.expander(f"🏦 {item['institution_name']}  —  linked {pd.to_datetime(item['linked_at']).strftime('%b %d, %Y')}", expanded=True):
+                item_accounts = accounts_df[accounts_df['item_id'] == item['item_id']]
+
+                if not item_accounts.empty:
+                    display_cols = ['name', 'type', 'subtype', 'current_balance', 'available_balance', 'last_synced']
+                    display_cols = [c for c in display_cols if c in item_accounts.columns]
+                    st.dataframe(
+                        item_accounts[display_cols].rename(columns={
+                            'name': 'Account', 'type': 'Type', 'subtype': 'Subtype',
+                            'current_balance': 'Balance', 'available_balance': 'Available',
+                            'last_synced': 'Last Synced'
+                        }),
+                        hide_index=True, use_container_width=True
+                    )
+
+                col_sync, col_remove = st.columns([1, 4])
+                with col_sync:
+                    if st.button("🔄 Sync Now", key=f"sync_{item['item_id']}"):
+                        with st.spinner(f"Syncing {item['institution_name']}..."):
+                            try:
+                                new_count = plaid_sync_item(
+                                    item['access_token'],
+                                    item['item_id'],
+                                    item['institution_name']
+                                )
+                                st.success(f"✅ {new_count} new transactions imported!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Sync failed: {e}")
+                with col_remove:
+                    if st.button("🗑️ Disconnect", key=f"remove_{item['item_id']}"):
+                        try:
+                            plaid_post("/item/remove", {"access_token": item['access_token']})
+                        except Exception:
+                            pass  # Best-effort removal on Plaid side
+                        with get_db_connection().connect() as conn:
+                            conn.execute(text("DELETE FROM plaid_items WHERE item_id = :id"), {"id": item['item_id']})
+                            conn.commit()
+                        st.success("Bank disconnected.")
+                        st.rerun()
+
+    st.divider()
+
+    # ------------------------------------------------------------------ #
+    # SECTION 2 — Sync ALL banks at once                                  #
+    # ------------------------------------------------------------------ #
+    if not items_df.empty:
+        if st.button("🔄 Sync All Banks", type="primary"):
+            total_new = 0
+            for _, item in items_df.iterrows():
+                with st.spinner(f"Syncing {item['institution_name']}..."):
+                    try:
+                        n = plaid_sync_item(item['access_token'], item['item_id'], item['institution_name'])
+                        total_new += n
+                    except Exception as e:
+                        st.warning(f"Could not sync {item['institution_name']}: {e}")
+            st.success(f"✅ Sync complete — {total_new} new transactions imported!")
+            st.rerun()
+        st.divider()
+
+    # ------------------------------------------------------------------ #
+    # SECTION 3 — Link a new bank via Plaid Link                          #
+    # ------------------------------------------------------------------ #
+    st.subheader("➕ Link a New Bank")
+    st.markdown("""
+    Clicking **Launch Bank Login** opens Plaid Link — the same secure login window used by apps like Venmo and Robinhood.  
+    Your credentials go directly to your bank. We only receive a token.
+    """)
+
+    # Generate a fresh link token each time this section renders
+    try:
+        link_token = plaid_create_link_token()
+    except Exception as e:
+        st.error(f"Could not create Plaid link token: {e}")
+        link_token = None
+
+    if link_token:
+        # Plaid Link runs in a small JS widget embedded in the page.
+        # We inject it via st.components and pass the public_token back
+        # through a query param which Streamlit can read.
+        public_token_param = st.query_params.get("plaid_public_token", "")
+
+        if public_token_param and public_token_param not in ["", "null"]:
+            # Exchange the public token for an access token
+            with st.spinner("Finishing bank connection..."):
+                try:
+                    access_token, item_id = plaid_exchange_public_token(public_token_param)
+                    # Get institution info
+                    item_info = plaid_post("/item/get", {"access_token": access_token})
+                    institution_id = item_info["item"].get("institution_id", "")
+                    institution_name = plaid_get_institution_name(institution_id) if institution_id else "Your Bank"
+
+                    with get_db_connection().connect() as conn:
+                        conn.execute(text("""
+                            INSERT INTO plaid_items (item_id, access_token, institution_name)
+                            VALUES (:iid, :tok, :name)
+                            ON CONFLICT (item_id) DO UPDATE SET
+                                access_token     = EXCLUDED.access_token,
+                                institution_name = EXCLUDED.institution_name
+                        """), {"iid": item_id, "tok": access_token, "name": institution_name})
+                        conn.commit()
+
+                    # Clear the query param and do initial sync
+                    st.query_params.clear()
+                    new_count = plaid_sync_item(access_token, item_id, institution_name)
+                    st.success(f"🎉 {institution_name} connected! {new_count} transactions imported.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to connect bank: {e}")
+                    st.query_params.clear()
+        else:
+            # Render the Plaid Link button
+            plaid_js = f"""
+            <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+            <button id="plaid-link-btn" onclick="openPlaidLink()" style="
+                background:#4CAF50; color:white; border:none; padding:12px 28px;
+                font-size:16px; border-radius:8px; cursor:pointer; font-weight:bold;">
+                🏦 Launch Bank Login
+            </button>
+            <p id="plaid-status" style="margin-top:10px; color:#666;"></p>
+            <script>
+            function openPlaidLink() {{
+                document.getElementById('plaid-status').innerText = 'Opening secure login...';
+                var handler = Plaid.create({{
+                    token: '{link_token}',
+                    onSuccess: function(public_token, metadata) {{
+                        document.getElementById('plaid-status').innerText = 'Bank linked! Finishing setup...';
+                        // Pass token back to Streamlit via query param
+                        var url = new URL(window.location.href);
+                        url.searchParams.set('plaid_public_token', public_token);
+                        window.location.href = url.toString();
+                    }},
+                    onExit: function(err, metadata) {{
+                        if (err) {{
+                            document.getElementById('plaid-status').innerText = 'Error: ' + err.display_message;
+                        }} else {{
+                            document.getElementById('plaid-status').innerText = 'Bank connection cancelled.';
+                        }}
+                    }},
+                }});
+                handler.open();
+            }}
+            </script>
+            """
+            st.components.v1.html(plaid_js, height=100)
+
+            st.caption("🔒 Bank-grade 256-bit encryption. Plaid is trusted by 8,000+ apps including Venmo, Coinbase, and Robinhood.")
+
+    # ------------------------------------------------------------------ #
+    # SECTION 4 — Setup instructions                                      #
+    # ------------------------------------------------------------------ #
+    with st.expander("📋 Setup Instructions", expanded=False):
+        st.markdown("""
+        **To activate Plaid sync, add these to your `.env` file or Streamlit secrets:**
+
+        ```
+        PLAID_CLIENT_ID=your_client_id_here
+        PLAID_SECRET=your_secret_here
+        PLAID_ENV=development   # use 'sandbox' for testing, 'development' or 'production' for real banks
+        ```
+
+        **Environments:**
+        - `sandbox` — test with fake credentials (username: `user_good`, password: `pass_good`)
+        - `development` — real banks, up to 100 live Items free
+        - `production` — real banks, requires Plaid approval
+
+        **After connecting a bank:**
+        - Hit **Sync Now** or **Sync All Banks** to pull latest transactions
+        - New transactions land in the **Rules & Inbox** tab for categorization
+        - Your auto-rules will apply automatically on every sync
+        """)
