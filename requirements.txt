@@ -1,3 +1,4 @@
+streamlit==1.42.0
 plaid-python
 psycopg2-binary
 python-dotenv
@@ -5,5 +6,5 @@ pandas
 SQLAlchemy
 plotly
 pdfplumber
-streamlit
 requests
+altair>=5.0.0
