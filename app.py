@@ -282,12 +282,18 @@ def save_to_neon(df):
 
 def plaid_create_link_token():
     """Create a link token to initialize Plaid Link."""
+    redirect_uri = (
+        os.getenv("PLAID_REDIRECT_URI")
+        or st.secrets.get("PLAID_REDIRECT_URI", "")
+        or "https://budgeting-pvssa2ft3xeahtshrebtxp.streamlit.app/~/+/app/static/plaid_link.html"
+    )
     payload = {
         "user": {"client_user_id": "budget-master-user"},
         "client_name": "My Budget Master",
         "products": ["transactions"],
         "country_codes": ["US"],
         "language": "en",
+        "redirect_uri": redirect_uri,
     }
     data = plaid_post("/link/token/create", payload)
     return data.get("link_token")
