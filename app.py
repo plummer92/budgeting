@@ -16,14 +16,23 @@ load_dotenv()
 st.set_page_config(page_title="My Budget Master", layout="wide", page_icon="💰")
 
 # --- DATABASE CONNECTION ---
-def get_db_connection():
+@st.cache_resource
+def get_engine():
     db_url = os.getenv("DATABASE_URL")
     if not db_url and "DATABASE_URL" in st.secrets:
         db_url = st.secrets["DATABASE_URL"]
     if not db_url:
         st.error("❌ Database URL not found!")
         st.stop()
-    return create_engine(db_url.replace("postgres://", "postgresql://"))
+    return create_engine(
+        db_url.replace("postgres://", "postgresql://"),
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=10,
+    )
+
+def get_db_connection():
+    return get_engine()
 
 # --- DB INIT (AUTO-FIXING) ---
 def init_db():
@@ -73,21 +82,22 @@ def init_db():
 # --- HELPERS ---
 def get_budget_setting(key, default_val):
     with get_db_connection().connect() as conn:
-        # Check if table has the column first to be safe, but init_db should handle it
         try:
             result = conn.execute(text("SELECT value FROM budget_settings WHERE key_name = :k"), {"k": key}).fetchone()
-            if result and result[0] is not None: return float(result[0])
-        except:
-            pass
+            if result and result[0] is not None:
+                return float(result[0])
+        except Exception as e:
+            st.warning(f"Could not read setting '{key}': {e}")
         return float(default_val)
 
 def get_str_setting(key, default_val):
     with get_db_connection().connect() as conn:
         try:
             result = conn.execute(text("SELECT str_value FROM budget_settings WHERE key_name = :k"), {"k": key}).fetchone()
-            if result and result[0] is not None: return str(result[0])
-        except:
-            pass
+            if result and result[0] is not None:
+                return str(result[0])
+        except Exception as e:
+            st.warning(f"Could not read setting '{key}': {e}")
         return str(default_val)
 
 def set_budget_setting(key, val, is_str=False):
@@ -215,7 +225,8 @@ def save_to_neon(df):
                     "pending": False, "source": row['source']
                 })
                 count += 1
-            except: pass
+            except Exception as e:
+                st.warning(f"Skipped duplicate or invalid row: {e}")
         conn.commit()
     return count
 
@@ -338,10 +349,10 @@ with tab_net:
         
         if accounts_df.empty:
             default_data = pd.DataFrame([
-                {"name": "Chime Checking", "type": "Asset", "balance": 1500.00},
-                {"name": "Chime Savings", "type": "Asset", "balance": 5000.00},
-                {"name": "Car Loan", "type": "Liability", "balance": 12000.00},
-                {"name": "Personal Loan", "type": "Liability", "balance": 5000.00}
+                {"name": "Checking Account", "type": "Asset", "balance": 0.00},
+                {"name": "Savings Account", "type": "Asset", "balance": 0.00},
+                {"name": "Loan 1", "type": "Liability", "balance": 0.00},
+                {"name": "Loan 2", "type": "Liability", "balance": 0.00}
             ])
             with get_db_connection().connect() as conn:
                 for _, row in default_data.iterrows():
@@ -434,10 +445,23 @@ with tab2:
         st.success("🎉 Inbox Zero! All transactions are categorized.")
 
     # --- 3. FULL HISTORY ---
-    st.divider(); st.subheader("🔍 Full History"); s=st.text_input("Search History:", "")
-    q = "SELECT * FROM transactions WHERE 1=1" + (f" AND (name ILIKE '%{s}%' OR amount::text LIKE '%{s}%')" if s else " ORDER BY date DESC LIMIT 50")
-    
-    with get_db_connection().connect() as c: h=pd.read_sql(text(q),c)
+    st.divider()
+    st.subheader("🔍 Full History")
+    s = st.text_input("Search History:", "")
+
+    with get_db_connection().connect() as c:
+        if s:
+            search_param = f"%{s}%"
+            h = pd.read_sql(
+                text("SELECT * FROM transactions WHERE name ILIKE :search OR amount::text LIKE :search ORDER BY date DESC LIMIT 200"),
+                c,
+                params={"search": search_param}
+            )
+        else:
+            h = pd.read_sql(
+                text("SELECT * FROM transactions ORDER BY date DESC LIMIT 50"),
+                c
+            )
     
     ed=st.data_editor(h, column_config={
         "transaction_id": None,
