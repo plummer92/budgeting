@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Connect Your Bank</title>
+  <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      display: flex; align-items: center; justify-content: center;
+      height: 100vh; margin: 0; background: #f0f2f6;
+    }
+    .card {
+      background: white; border-radius: 16px; padding: 40px;
+      text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.1);
+      max-width: 420px; width: 90%;
+    }
+    h2 { margin-bottom: 8px; color: #1a1a2e; }
+    p  { color: #666; margin-bottom: 28px; line-height: 1.5; }
+    button {
+      background: #4CAF50; color: white; border: none;
+      padding: 14px 32px; font-size: 16px; border-radius: 8px;
+      cursor: pointer; font-weight: bold; width: 100%;
+    }
+    button:hover { background: #43a047; }
+    button:disabled { background: #aaa; cursor: not-allowed; }
+    #status { margin-top: 16px; color: #666; font-size: 14px; min-height: 20px; }
+    .lock { font-size: 12px; color: #999; margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>🏦 Connect Your Bank</h2>
+    <p>Your login credentials go directly to your bank.<br>We only ever receive a secure token.</p>
+    <button id="btn" onclick="openLink()">Launch Bank Login</button>
+    <div id="status"></div>
+    <p class="lock">🔒 256-bit encryption · Trusted by Venmo, Coinbase & Robinhood</p>
+  </div>
+
+  <script>
+    // Read the link_token from the URL query string
+    // e.g. /static/plaid_link.html?link_token=link-sandbox-abc123&return_url=https://...
+    var params      = new URLSearchParams(window.location.search);
+    var link_token  = params.get('link_token');
+    var return_url  = params.get('return_url');
+
+    if (!link_token) {
+      document.getElementById('status').innerText = '❌ Missing link token. Please go back and try again.';
+      document.getElementById('btn').disabled = true;
+    } else {
+      // Auto-launch Plaid Link on page load
+      window.onload = openLink;
+    }
+
+    function openLink() {
+      document.getElementById('status').innerText = 'Opening secure login...';
+      document.getElementById('btn').disabled = true;
+
+      var handler = Plaid.create({
+        token: link_token,
+        onSuccess: function(public_token, metadata) {
+          document.getElementById('status').innerText = '✅ Bank linked! Returning to app...';
+          // Build the return URL with the public token appended
+          var dest = new URL(return_url || window.location.href);
+          dest.searchParams.set('plaid_public_token', public_token);
+          window.location.href = dest.toString();
+        },
+        onExit: function(err, metadata) {
+          document.getElementById('btn').disabled = false;
+          if (err) {
+            document.getElementById('status').innerText =
+              '❌ ' + (err.display_message || err.error_message || 'Something went wrong.');
+          } else {
+            document.getElementById('status').innerText = 'Cancelled. You can try again or close this tab.';
+          }
+        },
+      });
+
+      handler.open();
+    }
+  </script>
+</body>
+</html>
