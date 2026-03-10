@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
-from utils import get_db_connection, get_budget_setting, get_str_setting, set_budget_setting, init_db
+from utils import get_db_connection, get_budget_setting, get_str_setting, set_budget_setting, init_db, show_sidebar_alerts
 
 st.set_page_config(page_title="Life Balance", layout="wide", page_icon="📈")
 init_db()
+show_sidebar_alerts()
 
 st.title("📈 The Life Balance")
 st.caption("Are you winning or losing over time?")
