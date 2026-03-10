@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 from sqlalchemy import text
-from utils import get_db_connection, get_budget_setting, set_budget_setting, init_db
+from utils import get_db_connection, get_budget_setting, set_budget_setting, init_db, show_sidebar_alerts
 
 st.set_page_config(page_title="Weekly Dashboard", layout="wide", page_icon="📊")
 init_db()
+show_sidebar_alerts()
 
 st.title("📊 Weekly Dashboard")
 
