@@ -70,7 +70,7 @@ else:
     else:
         env['spent'] = 0.0
     env['spent']     = env['spent'].fillna(0)
-    env['available'] = env['funded'] - env['spent']
+    env['available'] = env['budgeted'] - env['spent']
 
     if 'expanded_env' not in st.session_state:
         st.session_state.expanded_env = None
