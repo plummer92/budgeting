@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from sqlalchemy import text
-from utils import get_db_connection, init_db
+from utils import get_db_connection, init_db, show_sidebar_alerts
 
 st.set_page_config(page_title="Net Worth", layout="wide", page_icon="🏦")
 init_db()
+show_sidebar_alerts()
 
 st.title("🏦 Net Worth & Loans")
 
