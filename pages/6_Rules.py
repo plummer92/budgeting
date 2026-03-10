@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import text
-from utils import get_db_connection, run_auto_categorization, CAT_OPTIONS, init_db
+from utils import get_db_connection, run_auto_categorization, CAT_OPTIONS, init_db, show_sidebar_alerts
 
 st.set_page_config(page_title="Rules & Inbox", layout="wide", page_icon="⚡")
 init_db()
+show_sidebar_alerts()
 
 st.title("⚡ Rules & Inbox")
 
