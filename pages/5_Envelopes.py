@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from sqlalchemy import text
-from utils import get_db_connection, CAT_OPTIONS, init_db
+from utils import get_db_connection, CAT_OPTIONS, init_db, show_sidebar_alerts
 
 st.set_page_config(page_title="Envelopes", layout="wide", page_icon="✉️")
 init_db()
+show_sidebar_alerts()
 
 st.title("✉️ Envelope Budgeting")
 st.caption("Give every dollar a job. Click any envelope to see its transactions.")
@@ -70,7 +71,7 @@ else:
     else:
         env['spent'] = 0.0
     env['spent']     = env['spent'].fillna(0)
-    env['available'] = env['budgeted'] - env['spent']
+    env['available'] = env['funded'] - env['spent']
 
     if 'expanded_env' not in st.session_state:
         st.session_state.expanded_env = None
