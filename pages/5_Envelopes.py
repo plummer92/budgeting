@@ -8,7 +8,7 @@ st.set_page_config(page_title="Envelopes", layout="wide", page_icon="✉️")
 init_db()
 
 st.title("✉️ Envelope Budgeting")
-st.caption("Give every dollar a job. Money sits in envelopes until you spend it.")
+st.caption("Give every dollar a job. Click any envelope to see its transactions.")
 
 current_month = datetime.now().strftime('%Y-%m')
 month_label   = datetime.now().strftime('%B %Y')
@@ -21,7 +21,19 @@ with get_db_connection().connect() as conn:
         conn, params=(current_month,)
     )
     transactions_df = pd.read_sql(
-        "SELECT category, SUM(ABS(amount)) as spent FROM transactions WHERE bucket='SPEND' AND DATE_TRUNC('month', date) = DATE_TRUNC('month', CURRENT_DATE) GROUP BY category",
+        """SELECT category, SUM(ABS(amount)) as spent
+           FROM transactions
+           WHERE bucket='SPEND'
+           AND DATE_TRUNC('month', date) = DATE_TRUNC('month', CURRENT_DATE)
+           GROUP BY category""",
+        conn
+    )
+    all_txns = pd.read_sql(
+        """SELECT date, name, amount, category
+           FROM transactions
+           WHERE bucket='SPEND'
+           AND DATE_TRUNC('month', date) = DATE_TRUNC('month', CURRENT_DATE)
+           ORDER BY date DESC""",
         conn
     )
 
@@ -33,15 +45,14 @@ if not envelopes_df.empty:
     total_left     = total_funded - total_spent
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Budgeted",  f"${total_budgeted:,.2f}")
+    m1.metric("Total Budgeted",    f"${total_budgeted:,.2f}")
     m2.metric("Funded This Month", f"${total_funded:,.2f}")
     m3.metric("Spent This Month",  f"${total_spent:,.2f}")
     m4.metric("Left to Spend",     f"${total_left:,.2f}",
               delta_color="normal" if total_left >= 0 else "inverse")
-
     st.divider()
 
-# ── Section 2: Envelope cards ─────────────────────────────────────────────────
+# ── Section 2: Envelope cards with drill-down ─────────────────────────────────
 if envelopes_df.empty:
     st.info("No envelopes yet. Create your first one below.")
 else:
@@ -61,36 +72,79 @@ else:
     env['spent']     = env['spent'].fillna(0)
     env['available'] = env['funded'] - env['spent']
 
+    if 'expanded_env' not in st.session_state:
+        st.session_state.expanded_env = None
+
     cols = st.columns(3)
     for i, (_, row) in enumerate(env.iterrows()):
         with cols[i % 3]:
-            budget  = row['budgeted'] if row['budgeted'] > 0 else 1
-            pct     = min(row['spent'] / budget, 1.0)
+            budget    = row['budgeted'] if row['budgeted'] > 0 else 1
+            pct       = min(row['spent'] / budget, 1.0)
             remaining = row['available']
-            color   = "#4CAF50" if pct < 0.75 else "#FF9800" if pct < 1.0 else "#f44336"
-            emoji   = "✅" if pct < 0.75 else "⚠️" if pct < 1.0 else "🔴"
+
+            if pct < 0.75:
+                border_color = "#2e7d32"
+                bar_color    = "#4CAF50"
+                text_color   = "#2e7d32"
+                bg_color     = "#f1f8f1"
+                emoji        = "✅"
+            elif pct < 1.0:
+                border_color = "#e65100"
+                bar_color    = "#FF9800"
+                text_color   = "#e65100"
+                bg_color     = "#fff8f1"
+                emoji        = "⚠️"
+            else:
+                border_color = "#c62828"
+                bar_color    = "#f44336"
+                text_color   = "#c62828"
+                bg_color     = "#fff1f1"
+                emoji        = "🔴"
 
             st.markdown(f"""
-            <div style="background:white; border-radius:12px; padding:16px; margin-bottom:12px;
-                        box-shadow:0 2px 8px rgba(0,0,0,0.08); border-left:4px solid {color};">
-                <div style="font-weight:bold; font-size:15px; margin-bottom:4px;">
+            <div style="background:{bg_color}; border-radius:12px; padding:16px; margin-bottom:4px;
+                        box-shadow:0 2px 8px rgba(0,0,0,0.10); border-left:5px solid {border_color};">
+                <div style="font-weight:700; font-size:16px; color:#111; margin-bottom:4px;">
                     {emoji} {row['name']}
                 </div>
-                <div style="color:#888; font-size:12px; margin-bottom:8px;">
+                <div style="font-size:12px; color:#444; margin-bottom:8px;">
                     {row['category'] or 'No category linked'} &middot; resets {row['reset_period']}
                 </div>
-                <div style="background:#f0f0f0; border-radius:4px; height:8px; margin-bottom:8px;">
-                    <div style="background:{color}; width:{pct*100:.0f}%; height:8px; border-radius:4px;"></div>
+                <div style="background:#ddd; border-radius:4px; height:10px; margin-bottom:10px;">
+                    <div style="background:{bar_color}; width:{pct*100:.0f}%; height:10px; border-radius:4px;"></div>
                 </div>
-                <div style="display:flex; justify-content:space-between; font-size:13px;">
-                    <span>Spent: <b>${row['spent']:,.2f}</b></span>
+                <div style="display:flex; justify-content:space-between; font-size:13px; color:#222;">
+                    <span>Spent: <b style="color:{text_color}">${row['spent']:,.2f}</b></span>
                     <span>Budget: <b>${row['budgeted']:,.2f}</b></span>
                 </div>
-                <div style="text-align:center; margin-top:6px; font-size:14px; font-weight:bold; color:{color};">
+                <div style="text-align:center; margin-top:8px; font-size:15px; font-weight:700; color:{text_color};">
                     {'$' + f"{remaining:,.2f} left" if remaining >= 0 else '⚠️ Over by $' + f"{abs(remaining):,.2f}"}
                 </div>
             </div>
             """, unsafe_allow_html=True)
+
+            is_open = st.session_state.expanded_env == row['name']
+            btn_label = "▲ Hide transactions" if is_open else "▼ View transactions"
+            if st.button(btn_label, key=f"toggle_{row['name']}", use_container_width=True):
+                st.session_state.expanded_env = None if is_open else row['name']
+                st.rerun()
+
+            if is_open:
+                cat_txns = all_txns[all_txns['category'] == row['category']] if row['category'] else pd.DataFrame()
+                if cat_txns.empty:
+                    st.info("No transactions this month for this envelope.")
+                else:
+                    cat_txns = cat_txns.copy()
+                    cat_txns['amount'] = cat_txns['amount'].abs()
+                    cat_txns['date']   = pd.to_datetime(cat_txns['date']).dt.strftime('%b %d')
+                    st.dataframe(
+                        cat_txns[['date', 'name', 'amount']].rename(columns={
+                            'date': 'Date', 'name': 'Transaction', 'amount': 'Amount'
+                        }),
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={"Amount": st.column_config.NumberColumn(format="$%.2f")}
+                    )
 
     if envelopes_df['budgeted'].sum() > 0:
         overall_pct = min(env['spent'].sum() / envelopes_df['budgeted'].sum(), 1.0)
@@ -193,14 +247,10 @@ if not envelopes_df.empty:
         if st.form_submit_button("💰 Save Funding", type="primary"):
             with get_db_connection().connect() as conn:
                 for env_id, amount in amounts.items():
-                    # Upsert: replace any existing funding for this envelope this month
-                    conn.execute(text("""
-                        DELETE FROM envelope_funding WHERE envelope_id=:eid AND month=:month
-                    """), {"eid": env_id, "month": current_month})
-                    conn.execute(text("""
-                        INSERT INTO envelope_funding (envelope_id, amount, month)
-                        VALUES (:eid, :amt, :month)
-                    """), {"eid": env_id, "amt": amount, "month": current_month})
+                    conn.execute(text("DELETE FROM envelope_funding WHERE envelope_id=:eid AND month=:month"),
+                                 {"eid": env_id, "month": current_month})
+                    conn.execute(text("INSERT INTO envelope_funding (envelope_id, amount, month) VALUES (:eid, :amt, :month)"),
+                                 {"eid": env_id, "amt": amount, "month": current_month})
                 conn.commit()
             st.success(f"✅ Envelopes funded for {month_label}!")
             st.rerun()
