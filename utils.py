@@ -22,7 +22,7 @@ PLAID_BASE_URL  = {
 
 CAT_OPTIONS = [
     "Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport",
-    "Travel", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement",
+    "Travel", "Entertainment", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement",
     "Pets", "RX", "Savings", "Gambling", "Personal Loan", "Uncategorized"
 ]
 
