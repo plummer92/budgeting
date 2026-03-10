@@ -8,6 +8,7 @@ from utils import (get_db_connection, plaid_create_link_token, plaid_exchange_pu
 
 st.set_page_config(page_title="Connected Banks", layout="wide", page_icon="🔗")
 init_db()
+show_sidebar_alerts()
 
 st.title("🔗 Connected Banks")
 st.caption("Connect your bank accounts once — transactions sync automatically.")
