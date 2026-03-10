@@ -1,8 +1,9 @@
 import streamlit as st
-from utils import clean_bank_file, save_to_neon, run_auto_categorization, init_db
+from utils import clean_bank_file, save_to_neon, run_auto_categorization, init_db, show_sidebar_alerts
 
 st.set_page_config(page_title="Upload", layout="wide", page_icon="📂")
 init_db()
+show_sidebar_alerts()
 
 st.title("📂 Upload Bank File")
 st.caption("Manually upload a CSV or PDF export from your bank.")
