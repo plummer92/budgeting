@@ -22,7 +22,7 @@ PLAID_BASE_URL  = {
 
 CAT_OPTIONS = [
     "Groceries", "Dining Out", "Rent", "Utilities", "Shopping", "Transport",
-    "Travel", "Entertainment", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement",
+    "Travel", "Income", "Subscriptions", "Credit Card Pay", "Home Improvement",
     "Pets", "RX", "Savings", "Gambling", "Personal Loan", "Uncategorized"
 ]
 
@@ -385,3 +385,71 @@ def plaid_sync_item(access_token, item_id, institution_name):
 
     run_auto_categorization()
     return added_total
+
+# ── Sidebar alerts ────────────────────────────────────────────────────────────
+def show_sidebar_alerts():
+    """
+    Call this at the top of every page to show spending alerts in the sidebar.
+    Triggers at 80% of budget used and 100% (over budget).
+    """
+    try:
+        with get_db_connection().connect() as conn:
+            envelopes = pd.read_sql("SELECT * FROM envelopes", conn)
+            spent_df  = pd.read_sql(
+                """SELECT category, SUM(ABS(amount)) as spent
+                   FROM transactions
+                   WHERE bucket='SPEND'
+                   AND DATE_TRUNC('month', date) = DATE_TRUNC('month', CURRENT_DATE)
+                   GROUP BY category""",
+                conn
+            )
+
+        if envelopes.empty:
+            return
+
+        env = envelopes.merge(spent_df, on='category', how='left')
+        env['spent']   = env['spent'].fillna(0)
+        env['pct']     = env.apply(
+            lambda r: r['spent'] / r['budgeted'] if r['budgeted'] > 0 else 0, axis=1
+        )
+        env['over']    = env['spent'] > env['budgeted']
+        env['warning'] = (env['pct'] >= 0.8) & (~env['over'])
+
+        over_list    = env[env['over']].to_dict('records')
+        warning_list = env[env['warning']].to_dict('records')
+        total_alerts = len(over_list) + len(warning_list)
+
+        with st.sidebar:
+            if total_alerts == 0:
+                st.success("✅ All envelopes on track")
+            else:
+                st.markdown(
+                    f"<div style='background:#c62828; color:white; border-radius:8px; "
+                    f"padding:8px 14px; font-weight:700; font-size:14px; margin-bottom:8px;'>"
+                    f"🚨 {total_alerts} Budget Alert{'s' if total_alerts > 1 else ''}"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+                for row in over_list:
+                    over_amt = row['spent'] - row['budgeted']
+                    st.markdown(
+                        f"<div style='background:#fff1f1; border-left:4px solid #c62828; "
+                        f"border-radius:6px; padding:8px 12px; margin-bottom:6px; font-size:13px; color:#111;'>"
+                        f"🔴 <b>{row['name']}</b><br>"
+                        f"Over by <b style='color:#c62828'>${over_amt:,.2f}</b> "
+                        f"(${row['spent']:,.2f} of ${row['budgeted']:,.2f})"
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+                for row in warning_list:
+                    st.markdown(
+                        f"<div style='background:#fff8f1; border-left:4px solid #e65100; "
+                        f"border-radius:6px; padding:8px 12px; margin-bottom:6px; font-size:13px; color:#111;'>"
+                        f"⚠️ <b>{row['name']}</b><br>"
+                        f"{row['pct']*100:.0f}% used — "
+                        f"${row['spent']:,.2f} of ${row['budgeted']:,.2f}"
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+    except Exception:
+        pass  # Never crash a page due to alerts
